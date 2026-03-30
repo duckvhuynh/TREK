@@ -7,6 +7,9 @@ export default {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Bai Jamjuree', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+      },
       colors: {
         primary: {
           50: '#eef2ff',
