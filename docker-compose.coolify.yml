@@ -1,0 +1,82 @@
+# ============================================================
+#  TREK — Coolify deployment (Traefik reverse proxy)
+#
+#  How to deploy:
+#  1. In Coolify → New Resource → Docker Compose → paste/link this file
+#  2. Set your environment variables in the Coolify UI:
+#       TREK_DOMAIN   → your domain, e.g. trek.yourdomain.com
+#       JWT_SECRET    → a long random secret  (openssl rand -hex 32)
+#  3. Coolify will provision the Let's Encrypt certificate automatically.
+# ============================================================
+
+services:
+  app:
+    image: mauriceboe/trek:latest
+    # ── OR build from source (uncomment when using a Git-based resource) ──
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+
+    container_name: trek
+    restart: unless-stopped
+
+    # Do NOT expose ports — Traefik handles inbound traffic
+    # ports:
+    #   - "3000:3000"
+
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - JWT_SECRET=${JWT_SECRET}
+      # Optional: lock CORS to your domain
+      # - ALLOWED_ORIGINS=https://${TREK_DOMAIN}
+
+    volumes:
+      - trek-data:/app/data
+      - trek-uploads:/app/uploads
+
+    networks:
+      - coolify   # Traefik proxy network (managed by Coolify)
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    labels:
+      # ── Traefik routing ──────────────────────────────────────────────────
+      - traefik.enable=true
+
+      # HTTP → HTTPS redirect
+      - traefik.http.routers.trek-http.rule=Host(`${TREK_DOMAIN}`)
+      - traefik.http.routers.trek-http.entrypoints=http
+      - traefik.http.routers.trek-http.middlewares=trek-redirect-https
+
+      - traefik.http.middlewares.trek-redirect-https.redirectscheme.scheme=https
+      - traefik.http.middlewares.trek-redirect-https.redirectscheme.permanent=true
+
+      # HTTPS
+      - traefik.http.routers.trek.rule=Host(`${TREK_DOMAIN}`)
+      - traefik.http.routers.trek.entrypoints=https
+      - traefik.http.routers.trek.tls=true
+      - traefik.http.routers.trek.tls.certresolver=letsencrypt
+
+      # Forward to container on port 3000
+      - traefik.http.services.trek.loadbalancer.server.port=3000
+
+      # WebSocket support (real-time collaboration)
+      - traefik.http.services.trek.loadbalancer.server.scheme=http
+      - traefik.http.middlewares.trek-ws.headers.customrequestheaders.Connection=keep-alive, Upgrade
+      - traefik.http.routers.trek.middlewares=trek-ws
+
+# ── Named volumes (Coolify manages their location on the host) ──────────────
+volumes:
+  trek-data:
+  trek-uploads:
+
+# ── Coolify's Traefik proxy network (must be external) ───────────────────────
+networks:
+  coolify:
+    external: true
