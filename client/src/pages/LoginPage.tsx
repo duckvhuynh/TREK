@@ -1,163 +1,31 @@
-import React, { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useAuthStore } from '../store/authStore'
-import { useSettingsStore } from '../store/settingsStore'
+import React from 'react'
 import { SUPPORTED_LANGUAGES, useTranslation } from '../i18n'
-import { authApi } from '../api/client'
-import { Plane, Eye, EyeOff, Mail, Lock, MapPin, Calendar, Package, User, Globe, Zap, Users, Wallet, Map, CheckSquare, BookMarked, FolderOpen, Route, Shield, KeyRound } from 'lucide-react'
-
-interface AppConfig {
-  has_users: boolean
-  allow_registration: boolean
-  demo_mode: boolean
-  oidc_configured: boolean
-  oidc_display_name?: string
-  oidc_only_mode: boolean
-}
+import { Plane, Eye, EyeOff, Mail, Lock, MapPin, Calendar, Package, User, Globe, Zap, Users, Wallet, Map, CheckSquare, BookMarked, FolderOpen, Route, Shield, KeyRound, ChevronDown, Fingerprint } from 'lucide-react'
+import { useLogin } from './login/useLogin'
+import ToggleSwitch from '../components/Settings/ToggleSwitch'
 
 export default function LoginPage(): React.ReactElement {
   const { t, language } = useTranslation()
-  const [mode, setMode] = useState<'login' | 'register'>('login')
-  const [username, setUsername] = useState<string>('')
-  const [email, setEmail] = useState<string>('')
-  const [password, setPassword] = useState<string>('')
-  const [showPassword, setShowPassword] = useState<boolean>(false)
-  const [isLoading, setIsLoading] = useState<boolean>(false)
-  const [error, setError] = useState<string>('')
-  const [appConfig, setAppConfig] = useState<AppConfig | null>(null)
-  const [inviteToken, setInviteToken] = useState<string>('')
-  const [inviteValid, setInviteValid] = useState<boolean>(false)
+  // Page = wiring container: the whole auth surface lives in the useLogin hook.
+  const {
+    navigate,
+    mode, setMode,
+    username, setUsername, email, setEmail, password, setPassword, rememberMe, setRememberMe, showPassword, setShowPassword,
+    isLoading, error, setError, insecureCookie, appConfig, inviteToken,
+    langDropdownOpen, setLangDropdownOpen, setLanguageLocal,
+    showTakeoff, mfaStep, setMfaStep, mfaToken, setMfaToken, mfaCode, setMfaCode,
+    passwordChangeStep, newPassword, setNewPassword, confirmPassword, setConfirmPassword,
+    noRedirect, showRegisterOption, oidcOnly,
+    handleDemoLogin, handleSubmit, handlePasskeyLogin,
+  } = useLogin()
 
-  const { login, register, demoLogin, completeMfaLogin } = useAuthStore()
-  const { setLanguageLocal } = useSettingsStore()
-  const navigate = useNavigate()
-
-  useEffect(() => {
-    authApi.getAppConfig?.().catch(() => null).then((config: AppConfig | null) => {
-      if (config) {
-        setAppConfig(config)
-        if (!config.has_users) setMode('register')
-        // Auto-redirect to OIDC if password auth is disabled
-        if (config.oidc_only_mode && config.oidc_configured && config.has_users) {
-          const params = new URLSearchParams(window.location.search)
-          if (!params.get('oidc_code') && !params.get('oidc_error') && !params.get('invite')) {
-            window.location.href = '/api/auth/oidc/login'
-          }
-        }
-      }
-    })
-
-    // Handle query params (invite token, OIDC callback)
-    const params = new URLSearchParams(window.location.search)
-
-    // Check for invite token in URL (/register?invite=xxx or /login?invite=xxx)
-    const invite = params.get('invite')
-    if (invite) {
-      setInviteToken(invite)
-      setMode('register')
-      authApi.validateInvite(invite).then(() => {
-        setInviteValid(true)
-      }).catch(() => {
-        setError('Invalid or expired invite link')
-      })
-      window.history.replaceState({}, '', window.location.pathname)
-    }
-
-    // Handle OIDC callback via short-lived auth code (secure exchange)
-    const oidcCode = params.get('oidc_code')
-    const oidcError = params.get('oidc_error')
-    if (oidcCode) {
-      window.history.replaceState({}, '', '/login')
-      fetch('/api/auth/oidc/exchange?code=' + encodeURIComponent(oidcCode))
-        .then(r => r.json())
-        .then(data => {
-          if (data.token) {
-            localStorage.setItem('auth_token', data.token)
-            navigate('/dashboard')
-            window.location.reload()
-          } else {
-            setError(data.error || 'OIDC login failed')
-          }
-        })
-        .catch(() => setError('OIDC login failed'))
-    }
-    if (oidcError) {
-      const errorMessages: Record<string, string> = {
-        registration_disabled: t('login.oidc.registrationDisabled'),
-        no_email: t('login.oidc.noEmail'),
-        token_failed: t('login.oidc.tokenFailed'),
-        invalid_state: t('login.oidc.invalidState'),
-      }
-      setError(errorMessages[oidcError] || oidcError)
-      window.history.replaceState({}, '', '/login')
-    }
-  }, [])
-
-  const handleDemoLogin = async (): Promise<void> => {
-    setError('')
-    setIsLoading(true)
-    try {
-      await demoLogin()
-      setShowTakeoff(true)
-      setTimeout(() => navigate('/dashboard'), 2600)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : t('login.demoFailed'))
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  const [showTakeoff, setShowTakeoff] = useState<boolean>(false)
-  const [mfaStep, setMfaStep] = useState(false)
-  const [mfaToken, setMfaToken] = useState('')
-  const [mfaCode, setMfaCode] = useState('')
-
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>): Promise<void> => {
-    e.preventDefault()
-    setError('')
-    setIsLoading(true)
-    try {
-      if (mode === 'login' && mfaStep) {
-        if (!mfaCode.trim()) {
-          setError(t('login.mfaCodeRequired'))
-          setIsLoading(false)
-          return
-        }
-        await completeMfaLogin(mfaToken, mfaCode)
-        setShowTakeoff(true)
-        setTimeout(() => navigate('/dashboard'), 2600)
-        return
-      }
-      if (mode === 'register') {
-        if (!username.trim()) { setError('Username is required'); setIsLoading(false); return }
-        if (password.length < 6) { setError('Password must be at least 6 characters'); setIsLoading(false); return }
-        await register(username, email, password, inviteToken || undefined)
-      } else {
-        const result = await login(email, password)
-        if ('mfa_required' in result && result.mfa_required && 'mfa_token' in result) {
-          setMfaToken(result.mfa_token)
-          setMfaStep(true)
-          setMfaCode('')
-          setIsLoading(false)
-          return
-        }
-      }
-      setShowTakeoff(true)
-      setTimeout(() => navigate('/dashboard'), 2600)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : t('login.error'))
-      setIsLoading(false)
-    }
-  }
-
-  const showRegisterOption = (appConfig?.allow_registration || !appConfig?.has_users || inviteValid) && !appConfig?.oidc_only_mode
-
-  // In OIDC-only mode, show a minimal page that redirects directly to the IdP
-  const oidcOnly = appConfig?.oidc_only_mode && appConfig?.oidc_configured
+  const oidcButtonShown = !!(appConfig?.oidc_configured && appConfig?.oidc_login && !oidcOnly)
+  const passkeyAvailable = !!(appConfig?.passkey_login && appConfig?.passkey_configured && !oidcOnly
+    && mode === 'login' && !mfaStep && !passwordChangeStep)
 
   const inputBase: React.CSSProperties = {
     width: '100%', padding: '11px 12px 11px 40px', border: '1px solid #e5e7eb',
-    borderRadius: 12, fontSize: 14, fontFamily: 'inherit', outline: 'none',
+    borderRadius: 12, fontSize: 'calc(14px * var(--fs-scale-body, 1))', fontFamily: 'inherit', outline: 'none',
     color: '#111827', background: 'white', boxSizing: 'border-box', transition: 'border-color 0.15s',
   }
 
@@ -236,7 +104,7 @@ export default function LoginPage(): React.ReactElement {
           display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
         }}>
           <img src="/logo-light.svg" alt="TREK" style={{ height: 72 }} />
-          <p style={{ margin: 0, fontSize: 20, color: 'rgba(255,255,255,0.6)', fontFamily: "'MuseoModerno', sans-serif", textTransform: 'lowercase', whiteSpace: 'nowrap' }}>{t('login.tagline')}</p>
+          <p style={{ margin: 0, fontSize: 'calc(20px * var(--fs-scale-title, 1))', color: 'rgba(255,255,255,0.6)', fontFamily: "'MuseoModerno', sans-serif", textTransform: 'lowercase', whiteSpace: 'nowrap' }}>{t('login.tagline')}</p>
         </div>
 
 
@@ -313,31 +181,68 @@ export default function LoginPage(): React.ReactElement {
   }
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif", position: 'relative' }}>
+    <div style={{ minHeight: '100vh', display: 'flex', fontFamily: "var(--font-system)", position: 'relative' }}>
 
-      {/* Language toggle */}
-      <button
-        onClick={() => {
-          const languages = SUPPORTED_LANGUAGES.map(({ value }) => value)
-          const currentIndex = languages.findIndex(code => code === language)
-          const nextLanguage = languages[(currentIndex + 1) % languages.length]
-          setLanguageLocal(nextLanguage)
-        }}
-        style={{
-          position: 'absolute', top: 16, right: 16, zIndex: 10,
-          display: 'flex', alignItems: 'center', gap: 6,
-          padding: '6px 12px', borderRadius: 99,
-          background: 'rgba(0,0,0,0.06)', border: 'none',
-          fontSize: 13, fontWeight: 500, color: '#374151',
-          cursor: 'pointer', fontFamily: 'inherit',
-          transition: 'background 0.15s',
-        }}
-        onMouseEnter={(e: React.MouseEvent<HTMLButtonElement>) => e.currentTarget.style.background = 'rgba(0,0,0,0.1)'}
-        onMouseLeave={(e: React.MouseEvent<HTMLButtonElement>) => e.currentTarget.style.background = 'rgba(0,0,0,0.06)'}
-      >
-        <Globe size={14} />
-        {language.toUpperCase()}
-      </button>
+      {/* Language dropdown */}
+      <div style={{ position: 'absolute', top: 16, right: 16, zIndex: 10 }}>
+        <button
+          onClick={(e) => { e.stopPropagation(); setLangDropdownOpen(o => !o) }}
+          aria-haspopup="listbox"
+          aria-expanded={langDropdownOpen}
+          aria-label="Change language"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '6px 12px', borderRadius: 99,
+            background: 'rgba(0,0,0,0.06)', border: 'none',
+            fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontWeight: 500, color: '#374151',
+            cursor: 'pointer', fontFamily: 'inherit',
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={(e: React.MouseEvent<HTMLButtonElement>) => e.currentTarget.style.background = 'rgba(0,0,0,0.1)'}
+          onMouseLeave={(e: React.MouseEvent<HTMLButtonElement>) => e.currentTarget.style.background = 'rgba(0,0,0,0.06)'}
+        >
+          <Globe size={14} />
+          {SUPPORTED_LANGUAGES.find(l => l.value === language)?.label ?? language.toUpperCase()}
+          <ChevronDown size={12} style={{ transition: 'transform 0.15s', transform: langDropdownOpen ? 'rotate(180deg)' : 'none' }} />
+        </button>
+
+        {langDropdownOpen && (
+          <div
+            role="listbox"
+            aria-label="Select language"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: 'absolute', top: '100%', right: 0, marginTop: 4,
+              background: 'white', borderRadius: 12,
+              boxShadow: '0 4px 24px rgba(0,0,0,0.12)',
+              border: '1px solid rgba(0,0,0,0.08)',
+              minWidth: 190, maxHeight: 320, overflowY: 'auto',
+            }}
+          >
+            {SUPPORTED_LANGUAGES.map(({ value, label }) => (
+              <button
+                key={value}
+                role="option"
+                aria-selected={value === language}
+                onClick={() => { setLanguageLocal(value); setLangDropdownOpen(false) }}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left',
+                  padding: '9px 16px', border: 'none',
+                  background: value === language ? 'rgba(99,102,241,0.08)' : 'transparent',
+                  color: value === language ? '#4f46e5' : '#374151',
+                  fontWeight: value === language ? 600 : 400,
+                  fontSize: 'calc(14px * var(--fs-scale-body, 1))', cursor: 'pointer', fontFamily: 'inherit',
+                  transition: 'background 0.1s',
+                }}
+                onMouseEnter={(e: React.MouseEvent<HTMLButtonElement>) => { if (value !== language) e.currentTarget.style.background = 'rgba(0,0,0,0.04)' }}
+                onMouseLeave={(e: React.MouseEvent<HTMLButtonElement>) => { if (value !== language) e.currentTarget.style.background = 'transparent' }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Left — branding */}
       <div style={{ display: 'none', width: '55%', background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%)', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', padding: '60px 48px', position: 'relative', overflow: 'hidden' }}
@@ -441,10 +346,10 @@ export default function LoginPage(): React.ReactElement {
             <img src="/logo-light.svg" alt="TREK" style={{ height: 64 }} />
           </div>
 
-          <h2 style={{ margin: '0 0 12px', fontSize: 36, fontWeight: 700, color: 'white', lineHeight: 1.15, letterSpacing: '-0.02em', fontFamily: "'MuseoModerno', sans-serif", textTransform: 'lowercase' }}>
+          <h2 style={{ margin: '0 0 12px', fontSize: 'calc(36px * var(--fs-scale-title, 1))', fontWeight: 700, color: 'white', lineHeight: 1.15, letterSpacing: '-0.02em', fontFamily: "'MuseoModerno', sans-serif", textTransform: 'lowercase' }}>
             {t('login.tagline')}
           </h2>
-          <p style={{ margin: '0 0 44px', fontSize: 15, color: 'rgba(255,255,255,0.5)', lineHeight: 1.7 }}>
+          <p style={{ margin: '0 0 44px', fontSize: 'calc(15px * var(--fs-scale-subtitle, 1))', color: 'rgba(255,255,255,0.5)', lineHeight: 1.7 }}>
             {t('login.description')}
           </p>
 
@@ -459,17 +364,17 @@ export default function LoginPage(): React.ReactElement {
               { Icon: FolderOpen, label: t('login.features.files'), desc: t('login.features.filesDesc') },
               { Icon: Route, label: t('login.features.routes'), desc: t('login.features.routesDesc') },
             ].map(({ Icon, label, desc }) => (
-              <div key={label} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 14, padding: '14px 12px', border: '1px solid rgba(255,255,255,0.06)', textAlign: 'left', transition: 'all 0.2s' }}
+              <div key={label} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 14, padding: '14px 12px', border: '1px solid rgba(255,255,255,0.06)', textAlign: 'left', transition: 'background 200ms cubic-bezier(0.23,1,0.32,1), border-color 200ms cubic-bezier(0.23,1,0.32,1)' }}
                 onMouseEnter={(e: React.MouseEvent<HTMLDivElement>) => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)' }}
                 onMouseLeave={(e: React.MouseEvent<HTMLDivElement>) => { e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)' }}>
                 <Icon size={17} style={{ color: 'rgba(255,255,255,0.7)', marginBottom: 7 }} />
-                <div style={{ fontSize: 12.5, color: 'white', fontWeight: 600, marginBottom: 2 }}>{label}</div>
-                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', lineHeight: 1.4 }}>{desc}</div>
+                <div style={{ fontSize: 'calc(12.5px * var(--fs-scale-body, 1))', color: 'white', fontWeight: 600, marginBottom: 2 }}>{label}</div>
+                <div style={{ fontSize: 'calc(11px * var(--fs-scale-caption, 1))', color: 'rgba(255,255,255,0.35)', lineHeight: 1.4 }}>{desc}</div>
               </div>
             ))}
           </div>
 
-          <p style={{ marginTop: 36, fontSize: 11.5, color: 'rgba(255,255,255,0.25)', letterSpacing: '0.03em' }}>
+          <p style={{ marginTop: 36, fontSize: 'calc(11.5px * var(--fs-scale-caption, 1))', color: 'rgba(255,255,255,0.25)', letterSpacing: '0.03em' }}>
             {t('login.selfHosted')}
           </p>
         </div>
@@ -484,27 +389,27 @@ export default function LoginPage(): React.ReactElement {
             className="mobile-logo">
             <style>{`@media(min-width:1024px){.mobile-logo{display:none!important}}`}</style>
             <img src="/logo-dark.svg" alt="TREK" style={{ height: 48 }} />
-            <p style={{ margin: 0, fontSize: 16, color: '#9ca3af', fontFamily: "'MuseoModerno', sans-serif", textTransform: 'lowercase', whiteSpace: 'nowrap' }}>{t('login.tagline')}</p>
+            <p style={{ margin: 0, fontSize: 'calc(16px * var(--fs-scale-subtitle, 1))', color: '#9ca3af', fontFamily: "'MuseoModerno', sans-serif", textTransform: 'lowercase', whiteSpace: 'nowrap' }}>{t('login.tagline')}</p>
           </div>
 
           <div style={{ background: 'white', borderRadius: 20, border: '1px solid #e5e7eb', padding: '36px 32px', boxShadow: '0 2px 16px rgba(0,0,0,0.06)' }}>
             {oidcOnly ? (
               <>
-                <h2 style={{ margin: '0 0 4px', fontSize: 22, fontWeight: 800, color: '#111827' }}>{t('login.title')}</h2>
-                <p style={{ margin: '0 0 24px', fontSize: 13.5, color: '#9ca3af' }}>{t('login.oidcOnly')}</p>
+                <h2 style={{ margin: '0 0 4px', fontSize: 'calc(22px * var(--fs-scale-title, 1))', fontWeight: 800, color: '#111827' }}>{t('login.title')}</h2>
+                <p style={{ margin: '0 0 24px', fontSize: 'calc(13.5px * var(--fs-scale-body, 1))', color: '#9ca3af' }}>{noRedirect ? t('login.oidcLoggedOut') : t('login.oidcOnly')}</p>
                 {error && (
-                  <div style={{ padding: '10px 14px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, fontSize: 13, color: '#dc2626', marginBottom: 16 }}>
+                  <div style={{ padding: '10px 14px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, fontSize: 'calc(13px * var(--fs-scale-body, 1))', color: '#dc2626', marginBottom: 16 }}>
                     {error}
                   </div>
                 )}
-                <a href="/api/auth/oidc/login"
+                <a href={`/api/auth/oidc/login${inviteToken ? '?invite=' + encodeURIComponent(inviteToken) : ''}`}
                   style={{
                     width: '100%', padding: '12px',
                     background: '#111827', color: 'white',
                     border: 'none', borderRadius: 12,
-                    fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                    fontSize: 'calc(14px * var(--fs-scale-body, 1))', fontWeight: 700, cursor: 'pointer',
                     fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                    textDecoration: 'none', transition: 'all 0.15s',
+                    textDecoration: 'none', transition: 'background 180ms cubic-bezier(0.23,1,0.32,1)',
                     boxSizing: 'border-box',
                   }}
                   onMouseEnter={(e: React.MouseEvent<HTMLAnchorElement>) => { e.currentTarget.style.background = '#1f2937' }}
@@ -516,51 +421,99 @@ export default function LoginPage(): React.ReactElement {
               </>
             ) : (
             <>
-            <h2 style={{ margin: '0 0 4px', fontSize: 22, fontWeight: 800, color: '#111827' }}>
-              {mode === 'login' && mfaStep
-                ? t('login.mfaTitle')
-                : mode === 'register'
-                  ? (!appConfig?.has_users ? t('login.createAdmin') : t('login.createAccount'))
-                  : t('login.title')}
+            <h2 style={{ margin: '0 0 4px', fontSize: 'calc(22px * var(--fs-scale-title, 1))', fontWeight: 800, color: '#111827' }}>
+              {passwordChangeStep
+                ? t('login.setNewPassword')
+                : mode === 'login' && mfaStep
+                  ? t('login.mfaTitle')
+                  : mode === 'register'
+                    ? (!appConfig?.has_users ? t('login.createAdmin') : t('login.createAccount'))
+                    : t('login.title')}
             </h2>
-            <p style={{ margin: '0 0 28px', fontSize: 13.5, color: '#9ca3af' }}>
-              {mode === 'login' && mfaStep
-                ? t('login.mfaSubtitle')
-                : mode === 'register'
-                  ? (!appConfig?.has_users ? t('login.createAdminHint') : t('login.createAccountHint'))
-                  : t('login.subtitle')}
+            <p style={{ margin: '0 0 28px', fontSize: 'calc(13.5px * var(--fs-scale-body, 1))', color: '#9ca3af' }}>
+              {passwordChangeStep
+                ? t('login.setNewPasswordHint')
+                : mode === 'login' && mfaStep
+                  ? t('login.mfaSubtitle')
+                  : mode === 'register'
+                    ? (!appConfig?.has_users ? t('login.createAdminHint') : t('login.createAccountHint'))
+                    : t('login.subtitle')}
             </p>
 
             <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
               {error && (
-                <div style={{ padding: '10px 14px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, fontSize: 13, color: '#dc2626' }}>
+                <div style={{ padding: '10px 14px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, fontSize: 'calc(13px * var(--fs-scale-body, 1))', color: '#dc2626' }}>
                   {error}
                 </div>
               )}
 
-              {mode === 'login' && mfaStep && (
+              {insecureCookie && (
+                <div style={{ padding: '12px 14px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, fontSize: 'calc(13px * var(--fs-scale-body, 1))', color: '#92400e' }}>
+                  <div style={{ fontWeight: 700, marginBottom: 4 }}>{t('login.insecureCookie.title')}</div>
+                  <div style={{ lineHeight: 1.55 }}>{t('login.insecureCookie.body')}</div>
+                  <a href="https://github.com/mauriceboe/TREK/wiki/Troubleshooting" target="_blank" rel="noopener noreferrer"
+                    style={{ display: 'inline-block', marginTop: 6, fontWeight: 600, color: '#b45309', textDecoration: 'underline' }}>
+                    {t('login.insecureCookie.link')} ↗
+                  </a>
+                </div>
+              )}
+
+              {passwordChangeStep && (
+                <>
+                  <div style={{ padding: '10px 14px', background: '#fefce8', border: '1px solid #fde68a', borderRadius: 10, fontSize: 'calc(13px * var(--fs-scale-body, 1))', color: '#92400e' }}>
+                    {t('settings.mustChangePassword')}
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: 'calc(12.5px * var(--fs-scale-body, 1))', fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('settings.newPassword')}</label>
+                    <div style={{ position: 'relative' }}>
+                      <Lock size={15} className="text-[#9ca3af]" style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+                      <input
+                        type="password" value={newPassword} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewPassword(e.target.value)} required
+                        placeholder={t('settings.newPassword')} style={inputBase}
+                        onFocus={(e: React.FocusEvent<HTMLInputElement>) => e.target.style.borderColor = '#111827'}
+                        onBlur={(e: React.FocusEvent<HTMLInputElement>) => e.target.style.borderColor = '#e5e7eb'}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: 'calc(12.5px * var(--fs-scale-body, 1))', fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('settings.confirmPassword')}</label>
+                    <div style={{ position: 'relative' }}>
+                      <Lock size={15} className="text-[#9ca3af]" style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+                      <input
+                        type="password" value={confirmPassword} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfirmPassword(e.target.value)} required
+                        placeholder={t('settings.confirmPassword')} style={inputBase}
+                        onFocus={(e: React.FocusEvent<HTMLInputElement>) => e.target.style.borderColor = '#111827'}
+                        onBlur={(e: React.FocusEvent<HTMLInputElement>) => e.target.style.borderColor = '#e5e7eb'}
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {mode === 'login' && mfaStep && !passwordChangeStep && (
                 <div>
-                  <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('login.mfaCodeLabel')}</label>
+                  <label style={{ display: 'block', fontSize: 'calc(12.5px * var(--fs-scale-body, 1))', fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('login.mfaCodeLabel')}</label>
                   <div style={{ position: 'relative' }}>
-                    <KeyRound size={15} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: '#9ca3af', pointerEvents: 'none' }} />
+                    <KeyRound size={15} className="text-[#9ca3af]" style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
                     <input
                       type="text"
-                      inputMode="numeric"
+                      inputMode="text"
                       autoComplete="one-time-code"
                       value={mfaCode}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                      placeholder="000000"
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setMfaCode(e.target.value.toUpperCase().slice(0, 24))}
+                      placeholder="000000 or XXXX-XXXX"
                       required
+                      autoFocus
                       style={inputBase}
                       onFocus={(e: React.FocusEvent<HTMLInputElement>) => e.target.style.borderColor = '#111827'}
                       onBlur={(e: React.FocusEvent<HTMLInputElement>) => e.target.style.borderColor = '#e5e7eb'}
                     />
                   </div>
-                  <p style={{ fontSize: 12, color: '#9ca3af', marginTop: 8 }}>{t('login.mfaHint')}</p>
+                  <p style={{ fontSize: 'calc(12px * var(--fs-scale-body, 1))', color: '#9ca3af', marginTop: 8 }}>{t('login.mfaHint')}</p>
                   <button
                     type="button"
                     onClick={() => { setMfaStep(false); setMfaToken(''); setMfaCode(''); setError('') }}
-                    style={{ marginTop: 8, background: 'none', border: 'none', color: '#6b7280', fontSize: 13, cursor: 'pointer', padding: 0, fontFamily: 'inherit' }}
+                    style={{ marginTop: 8, background: 'none', border: 'none', color: '#6b7280', fontSize: 'calc(13px * var(--fs-scale-body, 1))', cursor: 'pointer', padding: 0, fontFamily: 'inherit' }}
                   >
                     {t('login.mfaBack')}
                   </button>
@@ -568,11 +521,11 @@ export default function LoginPage(): React.ReactElement {
               )}
 
               {/* Username (register only) */}
-              {mode === 'register' && (
+              {mode === 'register' && !passwordChangeStep && (
                 <div>
-                  <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('login.username')}</label>
+                  <label style={{ display: 'block', fontSize: 'calc(12.5px * var(--fs-scale-body, 1))', fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('login.username')}</label>
                   <div style={{ position: 'relative' }}>
-                    <User size={15} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: '#9ca3af', pointerEvents: 'none' }} />
+                    <User size={15} className="text-[#9ca3af]" style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
                     <input
                       type="text" value={username} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setUsername(e.target.value)} required
                       placeholder="admin" style={inputBase}
@@ -584,11 +537,11 @@ export default function LoginPage(): React.ReactElement {
               )}
 
               {/* Email */}
-              {!(mode === 'login' && mfaStep) && (
+              {!(mode === 'login' && mfaStep) && !passwordChangeStep && (
               <div>
-                <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('common.email')}</label>
+                <label style={{ display: 'block', fontSize: 'calc(12.5px * var(--fs-scale-body, 1))', fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('common.email')}</label>
                 <div style={{ position: 'relative' }}>
-                  <Mail size={15} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: '#9ca3af', pointerEvents: 'none' }} />
+                  <Mail size={15} className="text-[#9ca3af]" style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
                   <input
                     type="email" value={email} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEmail(e.target.value)} required
                     placeholder={t('login.emailPlaceholder')} style={inputBase}
@@ -600,11 +553,11 @@ export default function LoginPage(): React.ReactElement {
               )}
 
               {/* Password */}
-              {!(mode === 'login' && mfaStep) && (
+              {!(mode === 'login' && mfaStep) && !passwordChangeStep && (
               <div>
-                <label style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('common.password')}</label>
+                <label style={{ display: 'block', fontSize: 'calc(12.5px * var(--fs-scale-body, 1))', fontWeight: 600, color: '#374151', marginBottom: 6 }}>{t('common.password')}</label>
                 <div style={{ position: 'relative' }}>
-                  <Lock size={15} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: '#9ca3af', pointerEvents: 'none' }} />
+                  <Lock size={15} className="text-[#9ca3af]" style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
                   <input
                     type={showPassword ? 'text' : 'password'} value={password} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)} required
                     placeholder="••••••••" style={{ ...inputBase, paddingRight: 44 }}
@@ -613,17 +566,49 @@ export default function LoginPage(): React.ReactElement {
                   />
                   <button type="button" onClick={() => setShowPassword(v => !v)} style={{
                     position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
-                    background: 'none', border: 'none', cursor: 'pointer', padding: 2, display: 'flex', color: '#9ca3af',
+                    background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#9ca3af',
+                    width: 22, height: 22,
                   }}>
-                    {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    <Eye size={16} style={{
+                      position: 'absolute', inset: 3,
+                      opacity: showPassword ? 0 : 1,
+                      transform: showPassword ? 'scale(0.7) rotate(-20deg)' : 'scale(1) rotate(0)',
+                      transition: 'opacity 180ms cubic-bezier(0.23,1,0.32,1), transform 180ms cubic-bezier(0.23,1,0.32,1)',
+                    }} />
+                    <EyeOff size={16} style={{
+                      position: 'absolute', inset: 3,
+                      opacity: showPassword ? 1 : 0,
+                      transform: showPassword ? 'scale(1) rotate(0)' : 'scale(0.7) rotate(20deg)',
+                      transition: 'opacity 180ms cubic-bezier(0.23,1,0.32,1), transform 180ms cubic-bezier(0.23,1,0.32,1)',
+                    }} />
                   </button>
                 </div>
+                {mode === 'login' && (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <ToggleSwitch on={rememberMe} onToggle={() => setRememberMe(!rememberMe)} label={t('login.rememberMe')} />
+                      <span
+                        onClick={() => setRememberMe(!rememberMe)}
+                        style={{ cursor: 'pointer', color: '#374151', fontSize: 'calc(12.5px * var(--fs-scale-body, 1))', fontWeight: 500, userSelect: 'none' }}
+                      >
+                        {t('login.rememberMe')}
+                      </span>
+                    </div>
+                    <button type="button" onClick={() => navigate('/forgot-password')} style={{
+                      background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                      color: '#6b7280', fontSize: 'calc(12.5px * var(--fs-scale-body, 1))', fontWeight: 500, fontFamily: 'inherit',
+                    }}
+                      onMouseEnter={(e: React.MouseEvent<HTMLButtonElement>) => { e.currentTarget.style.color = '#111827' }}
+                      onMouseLeave={(e: React.MouseEvent<HTMLButtonElement>) => { e.currentTarget.style.color = '#6b7280' }}
+                    >{t('login.forgotPassword')}</button>
+                  </div>
+                )}
               </div>
               )}
 
               <button type="submit" disabled={isLoading} style={{
                 marginTop: 4, width: '100%', padding: '12px', background: '#111827', color: 'white',
-                border: 'none', borderRadius: 12, fontSize: 14, fontWeight: 700, cursor: isLoading ? 'default' : 'pointer',
+                border: 'none', borderRadius: 12, fontSize: 'calc(14px * var(--fs-scale-body, 1))', fontWeight: 700, cursor: isLoading ? 'default' : 'pointer',
                 fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
                 opacity: isLoading ? 0.7 : 1, transition: 'opacity 0.15s',
               }}
@@ -631,18 +616,18 @@ export default function LoginPage(): React.ReactElement {
                 onMouseLeave={(e: React.MouseEvent<HTMLButtonElement>) => e.currentTarget.style.background = '#111827'}
               >
                 {isLoading
-                  ? <><div style={{ width: 15, height: 15, border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />{mode === 'register' ? t('login.creating') : (mode === 'login' && mfaStep ? t('login.mfaVerify') : t('login.signingIn'))}</>
-                  : <><Plane size={16} />{mode === 'register' ? t('login.createAccount') : (mode === 'login' && mfaStep ? t('login.mfaVerify') : t('login.signIn'))}</>
+                  ? <><div style={{ width: 15, height: 15, border: '2px solid rgba(255,255,255,0.3)', borderTopColor: 'white', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />{passwordChangeStep ? t('settings.updatePassword') : mode === 'register' ? t('login.creating') : (mode === 'login' && mfaStep ? t('login.mfaVerify') : t('login.signingIn'))}</>
+                  : <><Plane size={16} />{passwordChangeStep ? t('settings.updatePassword') : mode === 'register' ? t('login.createAccount') : (mode === 'login' && mfaStep ? t('login.mfaVerify') : t('login.signIn'))}</>
                 }
               </button>
             </form>
 
             {/* Toggle login/register */}
-            {showRegisterOption && appConfig?.has_users && !appConfig?.demo_mode && (
-              <p style={{ textAlign: 'center', marginTop: 16, fontSize: 13, color: '#9ca3af' }}>
+            {showRegisterOption && appConfig?.has_users && !appConfig?.demo_mode && !passwordChangeStep && (
+              <p style={{ textAlign: 'center', marginTop: 16, fontSize: 'calc(13px * var(--fs-scale-body, 1))', color: '#9ca3af' }}>
                 {mode === 'login' ? t('login.noAccount') + ' ' : t('login.hasAccount') + ' '}
                 <button onClick={() => { setMode(m => m === 'login' ? 'register' : 'login'); setError(''); setMfaStep(false); setMfaToken(''); setMfaCode('') }}
-                  style={{ background: 'none', border: 'none', color: '#111827', fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13 }}>
+                  style={{ background: 'none', border: 'none', color: '#111827', fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', fontSize: 'calc(13px * var(--fs-scale-body, 1))' }}>
                   {mode === 'login' ? t('login.register') : t('login.signIn')}
                 </button>
               </p>
@@ -650,22 +635,22 @@ export default function LoginPage(): React.ReactElement {
             </>)}
           </div>
 
-          {/* OIDC / SSO login button (only when OIDC is configured but not in oidc-only mode) */}
-          {appConfig?.oidc_configured && !oidcOnly && (
+          {/* OIDC / SSO login button (only when OIDC is configured, oidc_login enabled, not in oidc-only mode) */}
+          {appConfig?.oidc_configured && appConfig?.oidc_login && !oidcOnly && (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 16 }}>
                 <div style={{ flex: 1, height: 1, background: '#e5e7eb' }} />
-                <span style={{ fontSize: 12, color: '#9ca3af' }}>{t('common.or')}</span>
+                <span style={{ fontSize: 'calc(12px * var(--fs-scale-body, 1))', color: '#9ca3af' }}>{t('common.or')}</span>
                 <div style={{ flex: 1, height: 1, background: '#e5e7eb' }} />
               </div>
-              <a href="/api/auth/oidc/login"
+              <a href={`/api/auth/oidc/login${inviteToken ? '?invite=' + encodeURIComponent(inviteToken) : ''}`}
                 style={{
                   marginTop: 12, width: '100%', padding: '12px',
                   background: 'white', color: '#374151',
                   border: '1px solid #d1d5db', borderRadius: 12,
-                  fontSize: 14, fontWeight: 600, cursor: 'pointer',
+                  fontSize: 'calc(14px * var(--fs-scale-body, 1))', fontWeight: 600, cursor: 'pointer',
                   fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                  textDecoration: 'none', transition: 'all 0.15s',
+                  textDecoration: 'none', transition: 'background 180ms cubic-bezier(0.23,1,0.32,1), border-color 180ms cubic-bezier(0.23,1,0.32,1)',
                   boxSizing: 'border-box',
                 }}
                 onMouseEnter={(e: React.MouseEvent<HTMLAnchorElement>) => { e.currentTarget.style.background = '#f9fafb'; e.currentTarget.style.borderColor = '#9ca3af' }}
@@ -677,6 +662,36 @@ export default function LoginPage(): React.ReactElement {
             </>
           )}
 
+          {/* Passkey login button (instance toggle on + a usable RP ID resolves) */}
+          {passkeyAvailable && (
+            <>
+              {!oidcButtonShown && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 16 }}>
+                  <div style={{ flex: 1, height: 1, background: '#e5e7eb' }} />
+                  <span style={{ fontSize: 'calc(12px * var(--fs-scale-body, 1))', color: '#9ca3af' }}>{t('common.or')}</span>
+                  <div style={{ flex: 1, height: 1, background: '#e5e7eb' }} />
+                </div>
+              )}
+              <button type="button" onClick={handlePasskeyLogin} disabled={isLoading}
+                style={{
+                  marginTop: 12, width: '100%', padding: '12px',
+                  background: 'white', color: '#374151',
+                  border: '1px solid #d1d5db', borderRadius: 12,
+                  fontSize: 'calc(14px * var(--fs-scale-body, 1))', fontWeight: 600, cursor: isLoading ? 'default' : 'pointer',
+                  fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  opacity: isLoading ? 0.7 : 1,
+                  transition: 'background 180ms cubic-bezier(0.23,1,0.32,1), border-color 180ms cubic-bezier(0.23,1,0.32,1)',
+                  boxSizing: 'border-box',
+                }}
+                onMouseEnter={(e: React.MouseEvent<HTMLButtonElement>) => { if (!isLoading) { e.currentTarget.style.background = '#f9fafb'; e.currentTarget.style.borderColor = '#9ca3af' } }}
+                onMouseLeave={(e: React.MouseEvent<HTMLButtonElement>) => { e.currentTarget.style.background = 'white'; e.currentTarget.style.borderColor = '#d1d5db' }}
+              >
+                <Fingerprint size={16} />
+                {t('login.passkey.signIn')}
+              </button>
+            </>
+          )}
+
           {/* Demo login button */}
           {appConfig?.demo_mode && (
             <button onClick={handleDemoLogin} disabled={isLoading}
@@ -684,9 +699,9 @@ export default function LoginPage(): React.ReactElement {
                 marginTop: 16, width: '100%', padding: '14px',
                 background: 'linear-gradient(135deg, #f59e0b, #d97706)',
                 color: '#451a03', border: 'none', borderRadius: 14,
-                fontSize: 15, fontWeight: 700, cursor: isLoading ? 'default' : 'pointer',
+                fontSize: 'calc(15px * var(--fs-scale-subtitle, 1))', fontWeight: 700, cursor: isLoading ? 'default' : 'pointer',
                 fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-                opacity: isLoading ? 0.7 : 1, transition: 'all 0.2s',
+                opacity: isLoading ? 0.7 : 1, transition: 'transform 200ms cubic-bezier(0.23,1,0.32,1), box-shadow 200ms cubic-bezier(0.23,1,0.32,1), opacity 200ms cubic-bezier(0.23,1,0.32,1)',
                 boxShadow: '0 2px 12px rgba(245, 158, 11, 0.3)',
               }}
               onMouseEnter={(e: React.MouseEvent<HTMLButtonElement>) => { if (!isLoading) e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 4px 16px rgba(245, 158, 11, 0.4)' }}

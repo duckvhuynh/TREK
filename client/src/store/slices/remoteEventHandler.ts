@@ -1,14 +1,167 @@
 import type { StoreApi } from 'zustand'
 import type { TripStoreState } from '../tripStore'
-import type { Assignment, Place, Day, DayNote, PackingItem, BudgetItem, BudgetMember, Reservation, Trip, TripFile, WebSocketEvent } from '../../types'
+import type { Assignment, Place, Day, DayNote, PackingItem, TodoItem, BudgetItem, BudgetItemMember, Reservation, Trip, TripFile, WebSocketEvent } from '../../types'
+import { offlineDb } from '../../db/offlineDb'
 
 type SetState = StoreApi<TripStoreState>['setState']
+type GetState = StoreApi<TripStoreState>['getState']
+
+// ── Dexie write-through ───────────────────────────────────────────────────────
+
+/**
+ * Persist remote event to IndexedDB so the data is available offline.
+ * Fire-and-forget: errors are swallowed to never block the Zustand update.
+ * Called AFTER set() so `state` already reflects the update.
+ */
+function writeToDexie(
+  type: string,
+  payload: Record<string, unknown>,
+  state: TripStoreState,
+): void {
+  ;(async () => {
+    try {
+      switch (type) {
+        // ── Places ──────────────────────────────────────────────────────────
+        case 'place:created':
+        case 'place:updated':
+          await offlineDb.places.put(payload.place as Place)
+          break
+        case 'place:deleted':
+          await offlineDb.places.delete(payload.placeId as number)
+          break
+
+        // ── Assignments (embedded in Day rows) ──────────────────────────────
+        // Read the already-updated Day from the Zustand state and persist it.
+        case 'assignment:created':
+        case 'assignment:updated': {
+          const assignment = payload.assignment as Assignment
+          await _writeDayToDb(assignment.day_id, state)
+          break
+        }
+        case 'assignment:deleted': {
+          await _writeDayToDb(payload.dayId as number, state)
+          break
+        }
+        case 'assignment:moved': {
+          const movedAssignment = payload.assignment as Assignment
+          await Promise.all([
+            _writeDayToDb(payload.oldDayId as number, state),
+            _writeDayToDb(movedAssignment.day_id, state),
+          ])
+          break
+        }
+        case 'assignment:reordered':
+          await _writeDayToDb(payload.dayId as number, state)
+          break
+
+        // ── Days ─────────────────────────────────────────────────────────────
+        case 'day:created':
+        case 'day:updated': {
+          const day = payload.day as Day
+          await _writeDayToDb(day.id, state)
+          break
+        }
+        case 'day:deleted':
+          await offlineDb.days.delete(payload.dayId as number)
+          break
+
+        // ── Day notes (embedded in Day rows) ─────────────────────────────────
+        case 'dayNote:created':
+        case 'dayNote:updated':
+        case 'dayNote:deleted':
+          await _writeDayToDb(payload.dayId as number, state)
+          break
+
+        // ── Packing ──────────────────────────────────────────────────────────
+        case 'packing:created':
+        case 'packing:updated':
+          await offlineDb.packingItems.put(payload.item as PackingItem)
+          break
+        case 'packing:deleted':
+          await offlineDb.packingItems.delete(payload.itemId as number)
+          break
+
+        // ── Todo ─────────────────────────────────────────────────────────────
+        case 'todo:created':
+        case 'todo:updated':
+          await offlineDb.todoItems.put(payload.item as TodoItem)
+          break
+        case 'todo:deleted':
+          await offlineDb.todoItems.delete(payload.itemId as number)
+          break
+
+        // ── Budget ───────────────────────────────────────────────────────────
+        case 'budget:created':
+        case 'budget:updated':
+          await offlineDb.budgetItems.put(payload.item as BudgetItem)
+          break
+        case 'budget:deleted':
+          await offlineDb.budgetItems.delete(payload.itemId as number)
+          break
+        case 'budget:members-updated':
+        case 'budget:member-paid-updated':
+        case 'budget:reordered': {
+          // Partial update — read canonical item(s) from updated Zustand state
+          if (type === 'budget:reordered') {
+            await offlineDb.budgetItems.bulkPut(state.budgetItems)
+          } else {
+            const item = state.budgetItems.find(i => i.id === (payload.itemId as number))
+            if (item) await offlineDb.budgetItems.put(item)
+          }
+          break
+        }
+
+        // ── Reservations ─────────────────────────────────────────────────────
+        case 'reservation:created':
+        case 'reservation:updated':
+          await offlineDb.reservations.put(payload.reservation as Reservation)
+          break
+        case 'reservation:deleted':
+          await offlineDb.reservations.delete(payload.reservationId as number)
+          break
+
+        // ── Trip ─────────────────────────────────────────────────────────────
+        case 'trip:updated':
+          await offlineDb.trips.put(payload.trip as Trip)
+          break
+
+        // ── Files ─────────────────────────────────────────────────────────────
+        case 'file:created':
+        case 'file:updated':
+          await offlineDb.tripFiles.put(payload.file as TripFile)
+          break
+        case 'file:deleted':
+          await offlineDb.tripFiles.delete(payload.fileId as number)
+          break
+
+        default:
+          break
+      }
+    } catch {
+      // Dexie write failures are non-fatal — online state is source of truth
+    }
+  })()
+}
+
+/** Write a Day (with its current assignments + notes from Zustand) to Dexie. */
+async function _writeDayToDb(dayId: number, state: TripStoreState): Promise<void> {
+  const day = state.days.find(d => d.id === dayId)
+  if (!day) return
+  await offlineDb.days.put({
+    ...day,
+    assignments: state.assignments[String(dayId)] ?? [],
+    notes_items: state.dayNotes[String(dayId)] ?? [],
+  })
+}
+
+// ── Zustand event reducer ─────────────────────────────────────────────────────
 
 /**
  * Applies a remote WebSocket event to the local Zustand store, keeping state in sync across collaborators.
  * Each event type maps to an immutable state update (create/update/delete) for the relevant entity.
+ * After the Zustand update, the change is also written through to IndexedDB for offline access.
  */
-export function handleRemoteEvent(set: SetState, event: WebSocketEvent): void {
+export function handleRemoteEvent(set: SetState, get: GetState, event: WebSocketEvent): void {
   const { type, ...payload } = event
 
   set(state => {
@@ -40,25 +193,34 @@ export function handleRemoteEvent(set: SetState, event: WebSocketEvent): void {
 
       // Assignments
       case 'assignment:created': {
-        const dayKey = String((payload.assignment as Assignment).day_id)
-        const existing = (state.assignments[dayKey] || [])
-        const placeId = (payload.assignment as Assignment).place?.id || (payload.assignment as Assignment).place_id
-        if (existing.some(a => a.id === (payload.assignment as Assignment).id || (placeId && a.place?.id === placeId))) {
-          const hasTempVersion = existing.some(a => a.id < 0 && a.place?.id === placeId)
-          if (hasTempVersion) {
-            return {
-              assignments: {
-                ...state.assignments,
-                [dayKey]: existing.map(a => (a.id < 0 && a.place?.id === placeId) ? payload.assignment as Assignment : a),
-              }
-            }
+        const incoming = payload.assignment as Assignment
+        const dayKey = String(incoming.day_id)
+        const existing = state.assignments[dayKey] || []
+        const placeId = incoming.place?.id ?? incoming.place_id
+
+        // Already have this exact assignment id → duplicate broadcast or the
+        // echo of an already-committed assignment. No-op.
+        if (existing.some(a => a.id === incoming.id)) return {}
+
+        // Reconcile our own optimistic create: replace the temp (negative-id)
+        // assignment of the same place on this day with the real one. Guarded on
+        // a real placeId so an assignment with no place can never collapse onto
+        // another place-less one (undefined === undefined).
+        if (placeId != null) {
+          const tempIdx = existing.findIndex(a => a.id < 0 && a.place?.id === placeId)
+          if (tempIdx !== -1) {
+            const next = existing.slice()
+            next[tempIdx] = incoming
+            return { assignments: { ...state.assignments, [dayKey]: next } }
           }
-          return {}
         }
+
+        // Genuinely new — including a legitimate second assignment of a place
+        // already on this day (no temp version to reconcile). Append.
         return {
           assignments: {
             ...state.assignments,
-            [dayKey]: [...existing, payload.assignment as Assignment],
+            [dayKey]: [...existing, incoming],
           }
         }
       }
@@ -97,7 +259,7 @@ export function handleRemoteEvent(set: SetState, event: WebSocketEvent): void {
       case 'assignment:reordered': {
         const dayKey = String(payload.dayId)
         const currentItems = state.assignments[dayKey] || []
-        const orderedIds: number[] = payload.orderedIds || []
+        const orderedIds: number[] = (payload.orderedIds as number[] | undefined) || []
         const reordered = orderedIds.map((id, idx) => {
           const item = currentItems.find(a => a.id === id)
           return item ? { ...item, order_index: idx } : null
@@ -129,6 +291,15 @@ export function handleRemoteEvent(set: SetState, event: WebSocketEvent): void {
           assignments: newAssignments,
           dayNotes: newDayNotes,
         }
+      }
+      case 'day:reordered': {
+        // Apply the new order instantly when we know all ids; the authoritative
+        // dates + re-stamped booking times are pulled by the refresh below.
+        const orderedIds = payload.orderedIds as number[] | undefined
+        if (!orderedIds || orderedIds.length !== state.days.length) return {}
+        const byId = new Map(state.days.map(d => [d.id, d]))
+        if (!orderedIds.every(id => byId.has(id))) return {}
+        return { days: orderedIds.map((id, i) => ({ ...byId.get(id)!, day_number: i + 1 })) }
       }
 
       // Day Notes
@@ -175,6 +346,19 @@ export function handleRemoteEvent(set: SetState, event: WebSocketEvent): void {
           packingItems: state.packingItems.filter(i => i.id !== payload.itemId),
         }
 
+      // Todo
+      case 'todo:created':
+        if (state.todoItems.some(i => i.id === (payload.item as TodoItem).id)) return {}
+        return { todoItems: [...state.todoItems, payload.item as TodoItem] }
+      case 'todo:updated':
+        return {
+          todoItems: state.todoItems.map(i => i.id === (payload.item as TodoItem).id ? payload.item as TodoItem : i),
+        }
+      case 'todo:deleted':
+        return {
+          todoItems: state.todoItems.filter(i => i.id !== payload.itemId),
+        }
+
       // Budget
       case 'budget:created':
         if (state.budgetItems.some(i => i.id === (payload.item as BudgetItem).id)) return {}
@@ -190,17 +374,51 @@ export function handleRemoteEvent(set: SetState, event: WebSocketEvent): void {
       case 'budget:members-updated':
         return {
           budgetItems: state.budgetItems.map(i =>
-            i.id === payload.itemId ? { ...i, members: payload.members as BudgetMember[], persons: payload.persons as number } : i
+            i.id === payload.itemId ? { ...i, members: payload.members as BudgetItemMember[], persons: payload.persons as number } : i
           ),
         }
       case 'budget:member-paid-updated':
         return {
           budgetItems: state.budgetItems.map(i =>
             i.id === payload.itemId
-              ? { ...i, members: (i.members || []).map(m => m.user_id === payload.userId ? { ...m, paid: payload.paid } : m) }
+              // `paid` arrives over the wire as the raw value the server emits;
+              // it's stored verbatim. The member type models it as a number, so
+              // narrow without changing the value.
+              ? { ...i, members: (i.members || []).map(m => m.user_id === payload.userId ? { ...m, paid: payload.paid as number } : m) }
               : i
           ),
         }
+      case 'budget:reordered': {
+        if (payload.orderedIds) {
+          const orderedIds = payload.orderedIds as number[]
+          const byId = new Map(state.budgetItems.map(i => [i.id, i]))
+          const reordered = orderedIds.map((id, idx): BudgetItem | null => {
+            const item = byId.get(id)
+            return item ? { ...item, sort_order: idx } : null
+          }).filter((i): i is BudgetItem => i !== null)
+          const remaining = state.budgetItems.filter(i => !orderedIds.includes(i.id))
+          return { budgetItems: [...reordered, ...remaining] }
+        }
+        if (payload.orderedCategories) {
+          const orderedCategories = payload.orderedCategories as string[]
+          const grouped = new Map<string, BudgetItem[]>()
+          for (const item of state.budgetItems) {
+            const cat = item.category || 'Other'
+            if (!grouped.has(cat)) grouped.set(cat, [])
+            grouped.get(cat)!.push(item)
+          }
+          const reordered: BudgetItem[] = []
+          for (const cat of orderedCategories) {
+            const items = grouped.get(cat)
+            if (items) reordered.push(...items)
+          }
+          for (const [cat, items] of grouped) {
+            if (!orderedCategories.includes(cat)) reordered.push(...items)
+          }
+          return { budgetItems: reordered }
+        }
+        return {}
+      }
 
       // Reservations
       case 'reservation:created':
@@ -241,4 +459,17 @@ export function handleRemoteEvent(set: SetState, event: WebSocketEvent): void {
         return {}
     }
   })
+
+  // A reorder/insert re-pins dates and re-stamps booking times server-side, so
+  // pull the authoritative days + reservations for collaborators.
+  if (type === 'day:reordered') {
+    const tripId = get().trip?.id
+    if (tripId) {
+      get().refreshDays(tripId)
+      get().loadReservations(tripId)
+    }
+  }
+
+  // Write the change through to IndexedDB using the post-update state
+  writeToDexie(type, payload as Record<string, unknown>, get())
 }

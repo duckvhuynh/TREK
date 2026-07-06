@@ -15,6 +15,13 @@ export interface User {
   last_login?: string | null;
   mfa_enabled?: number | boolean;
   mfa_secret?: string | null;
+  mfa_backup_codes?: string | null;
+  must_change_password?: number | boolean;
+  first_seen_version?: string;
+  login_count?: number;
+  // Guest members (#1362): accountless trip participants. Flagged guests must never
+  // authenticate or appear in the global user directory.
+  is_guest?: number | boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -29,6 +36,7 @@ export interface Trip {
   currency: string;
   cover_image?: string | null;
   is_archived: number;
+  reminder_days: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -62,6 +70,7 @@ export interface Place {
   notes?: string | null;
   image_url?: string | null;
   google_place_id?: string | null;
+  google_ftid?: string | null;
   osm_id?: string | null;
   website?: string | null;
   phone?: string | null;
@@ -117,12 +126,18 @@ export interface BudgetItem {
   category: string;
   name: string;
   total_price: number;
+  currency?: string | null;
+  exchange_rate?: number;
   persons?: number | null;
   days?: number | null;
   note?: string | null;
+  reservation_id?: number | null;
+  paid_by_user_id?: number | null;
+  expense_date?: string | null;
   sort_order: number;
   created_at?: string;
   members?: BudgetItemMember[];
+  payers?: BudgetItemPayer[];
 }
 
 export interface BudgetItemMember {
@@ -132,12 +147,37 @@ export interface BudgetItemMember {
   avatar_url?: string | null;
   avatar?: string | null;
   budget_item_id?: number;
+  amount?: number | null;
+}
+
+export interface BudgetItemPayer {
+  user_id: number;
+  amount: number;
+  username?: string;
+  avatar_url?: string | null;
+  avatar?: string | null;
+  budget_item_id?: number;
+}
+
+export interface ReservationEndpoint {
+  id: number;
+  reservation_id: number;
+  role: 'from' | 'to' | 'stop';
+  sequence: number;
+  name: string;
+  code: string | null;
+  lat: number;
+  lng: number;
+  timezone: string | null;
+  local_time: string | null;
+  local_date: string | null;
 }
 
 export interface Reservation {
   id: number;
   trip_id: number;
   day_id?: number | null;
+  end_day_id?: number | null;
   place_id?: number | null;
   assignment_id?: number | null;
   title: string;
@@ -150,6 +190,8 @@ export interface Reservation {
   type: string;
   accommodation_id?: number | null;
   metadata?: string | null;
+  needs_review?: number;
+  endpoints?: ReservationEndpoint[];
   created_at?: string;
   day_number?: number;
   place_name?: string;
@@ -262,12 +304,12 @@ export interface Setting {
 }
 
 export interface AuthRequest extends Request {
-  user: { id: number; username: string; email: string; role: string };
+  user: User;
   trip?: { id: number; user_id: number };
 }
 
 export interface OptionalAuthRequest extends Request {
-  user: { id: number; username: string; email: string; role: string } | null;
+  user: User | null;
 }
 
 export interface AssignmentRow extends DayAssignment {
@@ -286,6 +328,7 @@ export interface AssignmentRow extends DayAssignment {
   image_url: string | null;
   transport_mode: string;
   google_place_id: string | null;
+  google_ftid: string | null;
   website: string | null;
   phone: string | null;
   category_name: string | null;
@@ -297,4 +340,108 @@ export interface Participant {
   user_id: number;
   username: string;
   avatar?: string | null;
+}
+
+// ── Journey addon ─────────────────────────────────────────────────────────
+
+export interface Journey {
+  id: number;
+  user_id: number;
+  title: string;
+  subtitle?: string | null;
+  cover_gradient?: string | null;
+  cover_image?: string | null;
+  status: 'draft' | 'active' | 'completed' | 'archived';
+  created_at: number;
+  updated_at: number;
+}
+
+export interface JourneyEntry {
+  id: number;
+  journey_id: number;
+  source_trip_id?: number | null;
+  source_place_id?: number | null;
+  author_id: number;
+  type: 'entry' | 'checkin' | 'skeleton';
+  title?: string | null;
+  story?: string | null;
+  entry_date: string;
+  entry_time?: string | null;
+  location_name?: string | null;
+  location_lat?: number | null;
+  location_lng?: number | null;
+  mood?: string | null;
+  weather?: string | null;
+  tags?: string | null;
+  pros_cons?: string | null;
+  visibility: 'private' | 'shared' | 'public';
+  sort_order: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface TrekPhoto {
+  id: number;
+  provider: string;
+  asset_id?: string | null;
+  owner_id?: number | null;
+  file_path?: string | null;
+  thumbnail_path?: string | null;
+  width?: number | null;
+  height?: number | null;
+  passphrase?: string | null;
+  /** 'image' (default) or 'video' — discriminates how the asset is served/played (#823). */
+  media_type?: string | null;
+  /** Optional video duration in milliseconds. */
+  duration_ms?: number | null;
+  created_at: string;
+}
+
+export interface JourneyPhoto {
+  id: number;
+  entry_id: number;
+  photo_id: number;
+  caption?: string | null;
+  sort_order: number;
+  shared: number;
+  created_at: number;
+  // Joined from trek_photos for API responses
+  provider?: string;
+  asset_id?: string | null;
+  owner_id?: number | null;
+  file_path?: string | null;
+  thumbnail_path?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+export interface GalleryPhoto {
+  id: number;
+  journey_id: number;
+  photo_id: number;
+  caption?: string | null;
+  shared: number;
+  sort_order: number;
+  created_at: number;
+  // Joined from trek_photos for API responses
+  provider?: string;
+  asset_id?: string | null;
+  owner_id?: number | null;
+  file_path?: string | null;
+  thumbnail_path?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+export interface JourneyTrip {
+  journey_id: number;
+  trip_id: number;
+  added_at: number;
+}
+
+export interface JourneyContributor {
+  journey_id: number;
+  user_id: number;
+  role: 'owner' | 'editor' | 'viewer';
+  added_at: number;
 }

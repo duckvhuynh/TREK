@@ -1,9 +1,9 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import jwt from 'jsonwebtoken';
-import { JWT_SECRET } from './config';
 import { db, canAccessTrip } from './db/database';
+import { consumeEphemeralTokenWithMeta } from './services/ephemeralTokens';
+import { emitPluginEvent } from './plugin-event-sink';
 import { User } from './types';
-import http from 'http';
+import http from 'node:http';
 
 interface NomadWebSocket extends WebSocket {
   isAlive: boolean;
@@ -24,13 +24,32 @@ let nextSocketId = 1;
 
 let wss: WebSocketServer | null = null;
 
+// Per-connection message rate limiting
+const WS_MSG_LIMIT = 30;        // max messages
+const WS_MSG_WINDOW = 10_000;   // per 10 seconds
+const socketMsgCounts = new WeakMap<NomadWebSocket, { count: number; windowStart: number }>();
+
 /** Attaches a WebSocket server with JWT auth, room-based trip channels, and heartbeat keep-alive. */
 function setupWebSocket(server: http.Server): void {
-  wss = new WebSocketServer({ server, path: '/ws' });
+  const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+    : null;
+
+  wss = new WebSocketServer({
+    server,
+    path: '/ws',
+    maxPayload: 64 * 1024, // 64 KB max message size
+    verifyClient: allowedOrigins
+      ? ({ origin }, cb) => {
+          if (!origin || allowedOrigins.includes(origin)) cb(true);
+          else cb(false, 403, 'Origin not allowed');
+        }
+      : undefined,
+  });
 
   const HEARTBEAT_INTERVAL = 30000; // 30 seconds
   const heartbeat = setInterval(() => {
-    wss!.clients.forEach((ws) => {
+    wss.clients.forEach((ws) => {
       const nws = ws as NomadWebSocket;
       if (nws.isAlive === false) return nws.terminate();
       nws.isAlive = false;
@@ -43,7 +62,7 @@ function setupWebSocket(server: http.Server): void {
   wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const nws = ws as NomadWebSocket;
     // Extract token from query param
-    const url = new URL(req.url!, 'http://localhost');
+    const url = new URL(req.url, 'http://localhost');
     const token = url.searchParams.get('token');
 
     if (!token) {
@@ -51,18 +70,37 @@ function setupWebSocket(server: http.Server): void {
       return;
     }
 
-    let user: User | undefined;
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET) as { id: number };
-      user = db.prepare(
-        'SELECT id, username, email, role FROM users WHERE id = ?'
-      ).get(decoded.id) as User | undefined;
-      if (!user) {
-        nws.close(4001, 'User not found');
-        return;
-      }
-    } catch (err: unknown) {
+    const consumed = consumeEphemeralTokenWithMeta(token, 'ws');
+    if (!consumed) {
       nws.close(4001, 'Invalid or expired token');
+      return;
+    }
+    const { userId } = consumed;
+
+    let row: (User & { password_version?: number }) | undefined;
+    row = db.prepare(
+      'SELECT id, username, email, role, mfa_enabled, password_version FROM users WHERE id = ?'
+    ).get(userId) as (User & { password_version?: number }) | undefined;
+    if (!row) {
+      nws.close(4001, 'User not found');
+      return;
+    }
+    // Session gate (defence-in-depth): reject a ws-token minted before a
+    // password change. Tokens carry the pv they were issued with; tokens
+    // minted without a pv (legacy) are treated as version 0, matching the
+    // JWT `pv` claim semantics in verifyJwtAndLoadUser.
+    const tokenPv = typeof consumed.pv === 'number' ? consumed.pv : 0;
+    const currentPv = typeof row.password_version === 'number' ? row.password_version : 0;
+    if (tokenPv !== currentPv) {
+      nws.close(4001, 'Invalid or expired token');
+      return;
+    }
+    // Don't leak password_version beyond the handshake.
+    const { password_version: _pv, ...user } = row;
+    const requireMfa = (db.prepare("SELECT value FROM app_settings WHERE key = 'require_mfa'").get() as { value: string } | undefined)?.value === 'true';
+    const mfaOk = user.mfa_enabled === 1 || user.mfa_enabled === true;
+    if (requireMfa && !mfaOk) {
+      nws.close(4403, 'MFA required');
       return;
     }
 
@@ -75,25 +113,44 @@ function setupWebSocket(server: http.Server): void {
 
     nws.on('pong', () => { nws.isAlive = true; });
 
+    socketMsgCounts.set(nws, { count: 0, windowStart: Date.now() });
+
     nws.on('message', (data) => {
+      // Rate limiting
+      const rate = socketMsgCounts.get(nws);
+      const now = Date.now();
+      if (now - rate.windowStart > WS_MSG_WINDOW) {
+        rate.count = 1;
+        rate.windowStart = now;
+      } else {
+        rate.count++;
+        if (rate.count > WS_MSG_LIMIT) {
+          nws.send(JSON.stringify({ type: 'error', message: 'Rate limit exceeded' }));
+          return;
+        }
+      }
+
       let msg: { type: string; tripId?: number | string };
       try {
         msg = JSON.parse(data.toString());
       } catch {
-        return;
+        return; // Malformed JSON, ignore
       }
+
+      // Basic validation
+      if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') return;
 
       if (msg.type === 'join' && msg.tripId) {
         const tripId = Number(msg.tripId);
         // Verify the user has access to this trip
-        if (!canAccessTrip(tripId, user!.id)) {
+        if (!canAccessTrip(tripId, user.id)) {
           nws.send(JSON.stringify({ type: 'error', message: 'Access denied' }));
           return;
         }
         // Add to room
         if (!rooms.has(tripId)) rooms.set(tripId, new Set());
-        rooms.get(tripId)!.add(nws);
-        socketRooms.get(nws)!.add(tripId);
+        rooms.get(tripId).add(nws);
+        socketRooms.get(nws).add(tripId);
         nws.send(JSON.stringify({ type: 'joined', tripId }));
       }
 
@@ -130,9 +187,16 @@ function leaveRoom(ws: NomadWebSocket, tripId: number): void {
 
 /**
  * Broadcast an event to all sockets in a trip room, optionally excluding a socket.
+ * When `onlyUserId` is given the event is delivered only to that user's sockets in
+ * the room — used to keep private packing items (#858) off other members' screens
+ * while still syncing the owner's own tabs.
  */
-function broadcast(tripId: number | string, eventType: string, payload: Record<string, unknown>, excludeSid?: number | string): void {
+function broadcast(tripId: number | string, eventType: string, payload: Record<string, unknown>, excludeSid?: number | string, onlyUserId?: number): void {
   tripId = Number(tripId);
+  // Announce every CORE trip event (name only, never the payload) to subscribed
+  // plugins — before the room check so it fires even with no connected viewers, and
+  // skipping plugin:* re-broadcasts so a plugin's own events can't loop back.
+  if (!eventType.startsWith('plugin:')) emitPluginEvent(tripId, eventType);
   const room = rooms.get(tripId);
   if (!room || room.size === 0) return;
 
@@ -142,6 +206,7 @@ function broadcast(tripId: number | string, eventType: string, payload: Record<s
     if (ws.readyState !== 1) continue; // WebSocket.OPEN === 1
     // Exclude the specific socket that triggered the change
     if (excludeNum && socketId.get(ws) === excludeNum) continue;
+    if (onlyUserId != null && socketUser.get(ws)?.id !== onlyUserId) continue;
     ws.send(JSON.stringify({ type: eventType, tripId, ...payload }));
   }
 }
@@ -155,7 +220,7 @@ function broadcastToUser(userId: number, payload: Record<string, unknown>, exclu
     if (nws.readyState !== 1) continue;
     if (excludeNum && socketId.get(nws) === excludeNum) continue;
     const user = socketUser.get(nws);
-    if (user && user.id === userId) {
+    if (user?.id === userId) {
       nws.send(JSON.stringify(payload));
     }
   }

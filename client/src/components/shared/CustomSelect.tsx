@@ -3,22 +3,26 @@ import ReactDOM from 'react-dom'
 import { ChevronDown, Check } from 'lucide-react'
 
 interface SelectOption {
-  value: string
+  // Callers use both string keys and numeric ids (e.g. day/place ids) as values;
+  // the component only does strict-equality lookups and key rendering, so either works.
+  value: string | number
   label: string
   icon?: React.ReactNode
   isHeader?: boolean
   searchLabel?: string
   groupLabel?: string
+  badge?: string
 }
 
 interface CustomSelectProps {
-  value: string
-  onChange: (value: string) => void
+  value: string | number
+  onChange: (value: string | number) => void
   options?: SelectOption[]
   placeholder?: string
   searchable?: boolean
   style?: React.CSSProperties
   size?: 'sm' | 'md'
+  disabled?: boolean
 }
 
 export default function CustomSelect({
@@ -29,6 +33,7 @@ export default function CustomSelect({
   searchable = false,
   style = {},
   size = 'md',
+  disabled = false,
 }: CustomSelectProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -83,33 +88,48 @@ export default function CustomSelect({
       {/* Trigger */}
       <button
         type="button"
-        onClick={() => { setOpen(o => !o); setSearch('') }}
+        disabled={disabled}
+        onClick={() => { if (!disabled) { setOpen(o => !o); setSearch('') } }}
         style={{
           width: '100%', display: 'flex', alignItems: 'center', gap: 8,
           padding: sm ? '8px 12px' : '8px 14px', borderRadius: 10,
           border: '1px solid var(--border-primary)',
           background: 'var(--bg-input)', color: 'var(--text-primary)',
-          fontSize: 13, fontWeight: 500, fontFamily: 'inherit',
-          cursor: 'pointer', outline: 'none', textAlign: 'left',
+          fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontWeight: 500, fontFamily: 'inherit',
+          cursor: disabled ? 'default' : 'pointer', outline: 'none', textAlign: 'left',
           transition: 'border-color 0.15s', overflow: 'hidden', minWidth: 0,
+          opacity: disabled ? 0.5 : 1,
         }}
-        onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--text-faint)'}
+        onMouseEnter={e => { if (!disabled) e.currentTarget.style.borderColor = 'var(--text-faint)' }}
         onMouseLeave={e => { if (!open) e.currentTarget.style.borderColor = 'var(--border-primary)' }}
       >
         {selected?.icon && <span style={{ display: 'flex', flexShrink: 0 }}>{selected.icon}</span>}
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: selected ? 'var(--text-primary)' : 'var(--text-faint)' }}>
           {selected ? selected.label : placeholder}
         </span>
-        <ChevronDown size={sm ? 12 : 14} style={{ flexShrink: 0, color: 'var(--text-faint)', transition: 'transform 0.2s', transform: open ? 'rotate(180deg)' : 'none' }} />
+        {selected?.badge && (
+          <span style={{
+            flexShrink: 0, fontSize: 'calc(10px * var(--fs-scale-caption, 1))', fontWeight: 600, color: 'var(--text-muted)',
+            background: 'var(--bg-tertiary)', padding: '2px 7px', borderRadius: 999,
+            letterSpacing: '0.01em',
+          }}>{selected.badge}</span>
+        )}
+        <ChevronDown size={sm ? 12 : 14} style={{ flexShrink: 0, color: 'var(--text-faint)', transition: 'transform 200ms cubic-bezier(0.23,1,0.32,1)', transform: open ? 'rotate(180deg)' : 'none' }} />
       </button>
 
       {/* Dropdown */}
       {open && ReactDOM.createPortal(
         <div ref={dropRef} style={{
           position: 'fixed',
-          top: (() => { const r = ref.current?.getBoundingClientRect(); return r ? r.bottom + 4 : 0 })(),
-          left: (() => { const r = ref.current?.getBoundingClientRect(); return r ? r.left : 0 })(),
-          width: (() => { const r = ref.current?.getBoundingClientRect(); return r ? r.width : 200 })(),
+          ...(() => {
+            const r = ref.current?.getBoundingClientRect()
+            if (!r) return { top: 0, left: 0, width: 200 }
+            const spaceBelow = window.innerHeight - r.bottom
+            const openUp = spaceBelow < 220 && r.top > spaceBelow
+            return openUp
+              ? { bottom: window.innerHeight - r.top + 4, left: r.left, width: r.width }
+              : { top: r.bottom + 4, left: r.left, width: r.width }
+          })(),
           zIndex: 99999,
           background: 'var(--bg-card)',
           backdropFilter: 'blur(24px) saturate(180%)',
@@ -118,7 +138,9 @@ export default function CustomSelect({
           borderRadius: 10,
           boxShadow: '0 8px 32px rgba(0,0,0,0.12)',
           overflow: 'hidden',
-          animation: 'selectIn 0.15s ease-out',
+          animation: 'trek-menu-enter 200ms cubic-bezier(0.23, 1, 0.32, 1)',
+          transformOrigin: 'top center',
+          willChange: 'transform, opacity',
         }}>
           {/* Search */}
           {searchable && (
@@ -131,7 +153,7 @@ export default function CustomSelect({
                 placeholder="..."
                 style={{
                   width: '100%', border: '1px solid var(--border-secondary)', borderRadius: 6,
-                  padding: '5px 8px', fontSize: 12, outline: 'none', fontFamily: 'inherit',
+                  padding: '5px 8px', fontSize: 'calc(12px * var(--fs-scale-body, 1))', outline: 'none', fontFamily: 'inherit',
                   background: 'var(--bg-secondary)', color: 'var(--text-primary)',
                   boxSizing: 'border-box',
                 }}
@@ -142,13 +164,13 @@ export default function CustomSelect({
           {/* Options */}
           <div style={{ maxHeight: 220, overflowY: 'auto', padding: '4px' }}>
             {filtered.length === 0 ? (
-              <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-faint)', textAlign: 'center' }}>—</div>
+              <div style={{ padding: '10px 12px', fontSize: 'calc(12px * var(--fs-scale-body, 1))', color: 'var(--text-faint)', textAlign: 'center' }}>—</div>
             ) : (
               filtered.map(option => {
                 if (option.isHeader) {
                   return (
                     <div key={option.value} style={{
-                      padding: '5px 10px', fontSize: 10, fontWeight: 700, color: 'var(--text-faint)',
+                      padding: '5px 10px', fontSize: 'calc(10px * var(--fs-scale-caption, 1))', fontWeight: 700, color: 'var(--text-faint)',
                       textTransform: 'uppercase', letterSpacing: '0.03em',
                       background: 'var(--bg-tertiary)', borderRadius: 4, margin: '2px 0',
                     }}>
@@ -166,7 +188,7 @@ export default function CustomSelect({
                       width: '100%', display: 'flex', alignItems: 'center', gap: 8,
                       padding: '7px 10px', borderRadius: 6,
                       border: 'none', background: isSelected ? 'var(--bg-hover)' : 'transparent',
-                      color: 'var(--text-primary)', fontSize: 13, fontFamily: 'inherit',
+                      color: 'var(--text-primary)', fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontFamily: 'inherit',
                       cursor: 'pointer', textAlign: 'left', transition: 'background 0.1s',
                     }}
                     onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
@@ -174,6 +196,13 @@ export default function CustomSelect({
                   >
                     {option.icon && <span style={{ display: 'flex', flexShrink: 0 }}>{option.icon}</span>}
                     <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{option.label}</span>
+                    {option.badge && (
+                      <span style={{
+                        flexShrink: 0, fontSize: 'calc(10px * var(--fs-scale-caption, 1))', fontWeight: 600, color: 'var(--text-muted)',
+                        background: 'var(--bg-tertiary)', padding: '2px 7px', borderRadius: 999,
+                        letterSpacing: '0.01em',
+                      }}>{option.badge}</span>
+                    )}
                     {isSelected && <Check size={13} style={{ flexShrink: 0, color: 'var(--text-muted)' }} />}
                   </button>
                 )
@@ -184,12 +213,6 @@ export default function CustomSelect({
         document.body
       )}
 
-      <style>{`
-        @keyframes selectIn {
-          from { opacity: 0; transform: translateY(-4px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
     </div>
   )
 }

@@ -17,9 +17,58 @@ function createTables(db: Database.Database): void {
       last_login DATETIME,
       mfa_enabled INTEGER DEFAULT 0,
       mfa_secret TEXT,
+      mfa_backup_codes TEXT,
+      immich_url TEXT,
+      immich_access_token TEXT,
+      synology_url TEXT,
+      synology_username TEXT,
+      synology_password TEXT,
+      synology_sid TEXT,
+      must_change_password INTEGER DEFAULT 0,
+      password_version INTEGER NOT NULL DEFAULT 0,
+      feed_token TEXT,
+      is_guest INTEGER NOT NULL DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at DATETIME NOT NULL,
+      consumed_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      created_ip TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_prt_user ON password_reset_tokens(user_id);
+    CREATE INDEX IF NOT EXISTS idx_prt_hash ON password_reset_tokens(token_hash);
+
+    CREATE TABLE IF NOT EXISTS webauthn_credentials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      credential_id TEXT NOT NULL UNIQUE,
+      public_key BLOB NOT NULL,
+      counter INTEGER NOT NULL DEFAULT 0,
+      transports TEXT,
+      device_type TEXT,
+      backed_up INTEGER NOT NULL DEFAULT 0,
+      name TEXT,
+      aaguid TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_used_at DATETIME
+    );
+    CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id);
+
+    CREATE TABLE IF NOT EXISTS webauthn_challenges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      challenge TEXT NOT NULL UNIQUE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
 
     CREATE TABLE IF NOT EXISTS settings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,6 +88,8 @@ function createTables(db: Database.Database): void {
       currency TEXT DEFAULT 'EUR',
       cover_image TEXT,
       is_archived INTEGER DEFAULT 0,
+      reminder_days INTEGER DEFAULT 3,
+      feed_token TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -90,6 +141,7 @@ function createTables(db: Database.Database): void {
       notes TEXT,
       image_url TEXT,
       google_place_id TEXT,
+      google_ftid TEXT,
       website TEXT,
       phone TEXT,
       transport_mode TEXT DEFAULT 'walking',
@@ -156,9 +208,11 @@ function createTables(db: Database.Database): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
       day_id INTEGER REFERENCES days(id) ON DELETE SET NULL,
+      end_day_id INTEGER REFERENCES days(id) ON DELETE SET NULL,
       place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
       assignment_id INTEGER REFERENCES day_assignments(id) ON DELETE SET NULL,
       title TEXT NOT NULL,
+      accommodation_id TEXT,
       reservation_time TEXT,
       reservation_end_time TEXT,
       location TEXT,
@@ -217,6 +271,31 @@ function createTables(db: Database.Database): void {
       enabled INTEGER DEFAULT 0,
       config TEXT DEFAULT '{}',
       sort_order INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS photo_providers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      icon TEXT DEFAULT 'Image',
+      enabled INTEGER DEFAULT 0,
+      sort_order INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS photo_provider_fields (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider_id TEXT NOT NULL REFERENCES photo_providers(id) ON DELETE CASCADE,
+      field_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      input_type TEXT NOT NULL DEFAULT 'text',
+      placeholder TEXT,
+      hint TEXT,
+      required INTEGER DEFAULT 0,
+      secret INTEGER DEFAULT 0,
+      settings_key TEXT,
+      payload_key TEXT,
+      sort_order INTEGER DEFAULT 0,
+      UNIQUE(provider_id, field_key)
     );
 
     -- Vacay addon tables
@@ -292,13 +371,100 @@ function createTables(db: Database.Database): void {
       sort_order INTEGER NOT NULL DEFAULT 0
     );
 
+    -- Collections addon tables
+    CREATE TABLE IF NOT EXISTS collections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      description TEXT,
+      color TEXT DEFAULT '#6366f1',
+      icon TEXT DEFAULT 'Bookmark',
+      cover_image TEXT,
+      links TEXT,
+      sort_order INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS collection_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      role TEXT NOT NULL DEFAULT 'editor',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(collection_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS collection_places (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+      owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      lat REAL,
+      lng REAL,
+      address TEXT,
+      category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+      price REAL,
+      currency TEXT,
+      notes TEXT,
+      image_url TEXT,
+      google_place_id TEXT,
+      google_ftid TEXT,
+      osm_id TEXT,
+      website TEXT,
+      phone TEXT,
+      status TEXT NOT NULL DEFAULT 'idea',
+      source_trip_id INTEGER,
+      source_place_id INTEGER,
+      links TEXT,
+      sort_order INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS collection_place_tags (
+      collection_place_id INTEGER NOT NULL REFERENCES collection_places(id) ON DELETE CASCADE,
+      tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+      PRIMARY KEY (collection_place_id, tag_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_collection_places_collection ON collection_places(collection_id);
+    CREATE INDEX IF NOT EXISTS idx_collection_members_user ON collection_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_collection_place_tags_place ON collection_place_tags(collection_place_id);
+    CREATE INDEX IF NOT EXISTS idx_collection_place_tags_tag ON collection_place_tags(tag_id);
+
+    -- Per-collection custom labels (distinct from the instance-wide tags table):
+    -- each list defines its own labels and every place can carry several.
+    CREATE TABLE IF NOT EXISTS collection_labels (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      color TEXT DEFAULT '#6366f1',
+      sort_order INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS collection_place_labels (
+      collection_place_id INTEGER NOT NULL REFERENCES collection_places(id) ON DELETE CASCADE,
+      label_id INTEGER NOT NULL REFERENCES collection_labels(id) ON DELETE CASCADE,
+      PRIMARY KEY (collection_place_id, label_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_collection_labels_collection ON collection_labels(collection_id);
+    CREATE INDEX IF NOT EXISTS idx_collection_place_labels_place ON collection_place_labels(collection_place_id);
+    CREATE INDEX IF NOT EXISTS idx_collection_place_labels_label ON collection_place_labels(label_id);
+
     CREATE TABLE IF NOT EXISTS day_accommodations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
-      place_id INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
+      place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
       start_day_id INTEGER NOT NULL REFERENCES days(id) ON DELETE CASCADE,
       end_day_id INTEGER NOT NULL REFERENCES days(id) ON DELETE CASCADE,
       check_in TEXT,
+      check_in_end TEXT,
       check_out TEXT,
       confirmation TEXT,
       notes TEXT,
@@ -380,6 +546,52 @@ function createTables(db: Database.Database): void {
       UNIQUE(assignment_id, user_id)
     );
     CREATE INDEX IF NOT EXISTS idx_assignment_participants_assignment ON assignment_participants(assignment_id);
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      action TEXT NOT NULL,
+      resource TEXT,
+      details TEXT,
+      ip TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL CHECK(type IN ('simple', 'boolean', 'navigate')),
+      scope TEXT NOT NULL CHECK(scope IN ('trip', 'user', 'admin')),
+      target INTEGER NOT NULL,
+      sender_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title_key TEXT NOT NULL,
+      title_params TEXT DEFAULT '{}',
+      text_key TEXT NOT NULL,
+      text_params TEXT DEFAULT '{}',
+      positive_text_key TEXT,
+      negative_text_key TEXT,
+      positive_callback TEXT,
+      negative_callback TEXT,
+      response TEXT CHECK(response IN ('positive', 'negative')),
+      navigate_text_key TEXT,
+      navigate_target TEXT,
+      is_read INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipient_id, is_read, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created ON notifications(recipient_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS notification_channel_preferences (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (user_id, event_type, channel)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ncp_user ON notification_channel_preferences(user_id);
+
+    CREATE TABLE IF NOT EXISTS migrations (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, timestamp bigint NOT NULL, name varchar NOT NULL);
   `);
 }
 

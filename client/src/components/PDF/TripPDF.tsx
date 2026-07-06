@@ -1,15 +1,38 @@
 // Trip PDF via browser print window
 import { createElement } from 'react'
 import { getCategoryIcon } from '../shared/categoryIcons'
-import { FileText, Info, Clock, MapPin, Navigation, Train, Plane, Bus, Car, Ship, Coffee, Ticket, Star, Heart, Camera, Flag, Lightbulb, AlertTriangle, ShoppingBag, Bookmark } from 'lucide-react'
-import { mapsApi } from '../../api/client'
-import type { Trip, Day, Place, Category, AssignmentsMap, DayNotesMap } from '../../types'
+import { FileText, Info, Clock, MapPin, Navigation, Train, Plane, Bus, Car, Ship, Sailboat, Bike, CarTaxiFront, Route, Coffee, Ticket, Star, Heart, Camera, Flag, Lightbulb, AlertTriangle, ShoppingBag, Bookmark, Hotel, LogIn, LogOut, KeyRound, BedDouble, Utensils, Users, LucideIcon } from 'lucide-react'
+import { accommodationsApi, mapsApi } from '../../api/client'
+import type { Trip, Day, Place, Category, AssignmentsMap, DayNote } from '../../types'
+import { isDayInAccommodationRange, getDayOrder } from '../../utils/dayOrder'
+import { splitReservationDateTime } from '../../utils/formatters'
+import { getFlightLegs, getTrainLegs } from '../../utils/flightLegs'
+
+function renderLucideIcon(icon:LucideIcon, props = {}) {
+  if (!_renderToStaticMarkup) return ''
+  return _renderToStaticMarkup(
+    createElement(icon, props)
+  );
+}
 
 const NOTE_ICON_MAP = { FileText, Info, Clock, MapPin, Navigation, Train, Plane, Bus, Car, Ship, Coffee, Ticket, Star, Heart, Camera, Flag, Lightbulb, AlertTriangle, ShoppingBag, Bookmark }
 function noteIconSvg(iconId) {
-  if (!_renderToStaticMarkup) return ''
   const Icon = NOTE_ICON_MAP[iconId] || FileText
-  return _renderToStaticMarkup(createElement(Icon, { size: 14, strokeWidth: 1.8, color: '#94a3b8' }))
+  return renderLucideIcon(Icon, { size: 14, strokeWidth: 1.8, color: '#94a3b8' })
+}
+
+const RESERVATION_ICON_MAP = { flight: Plane, train: Train, bus: Bus, car: Car, taxi: CarTaxiFront, bicycle: Bike, cruise: Ship, ferry: Sailboat, transport_other: Route, restaurant: Utensils, event: Ticket, tour: Users, other: FileText }
+const RESERVATION_COLOR_MAP = { flight: '#3b82f6', train: '#06b6d4', bus: '#059669', car: '#6b7280', taxi: '#ca8a04', bicycle: '#84cc16', cruise: '#0ea5e9', ferry: '#0d9488', transport_other: '#6b7280', restaurant: '#ef4444', event: '#f59e0b', tour: '#10b981', other: '#6b7280' }
+function reservationIconSvg(type) {
+  const Icon = RESERVATION_ICON_MAP[type] || Ticket
+  const color = RESERVATION_COLOR_MAP[type] || '#3b82f6'
+  return renderLucideIcon(Icon, { size: 14, strokeWidth: 1.8, color })
+}
+
+const ACCOMMODATION_ICON_MAP = { accommodation: Hotel, checkin: LogIn, checkout: LogOut, location: MapPin, note: FileText, confirmation: KeyRound }
+function accommodationIconSvg(type) {
+  const Icon = ACCOMMODATION_ICON_MAP[type] || BedDouble
+  return renderLucideIcon(Icon, { size: 14, strokeWidth: 1.8, color: '#03398f', className: 'accommodation-icon' })
 }
 
 // ── SVG inline icons (for chips) ─────────────────────────────────────────────
@@ -33,6 +56,10 @@ function absUrl(url) {
 function safeImg(url) {
   if (!url) return null
   if (url.startsWith('https://') || url.startsWith('http://')) return url
+  // The in-app place-photo proxy always streams a JPEG but has no file extension
+  // (it ends in …/bytes), so the extension check below would wrongly reject it —
+  // which is why persisted place photos showed as category icons in the PDF.
+  if (url.startsWith('/api/maps/place-photo/')) return absUrl(url)
   return /\.(jpe?g|png|webp|bmp|tiff?)(\?.*)?$/i.test(url) ? absUrl(url) : null
 }
 
@@ -54,15 +81,15 @@ function categoryIconSvg(iconName, color = '#6366f1', size = 24) {
 
 function shortDate(d, locale) {
   if (!d) return ''
-  return new Date(d + 'T00:00:00').toLocaleDateString(locale, { weekday: 'short', day: 'numeric', month: 'short' })
+  return new Date(d + 'T00:00:00Z').toLocaleDateString(locale, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })
 }
 
 function longDateRange(days, locale) {
   const dd = [...days].filter(d => d.date).sort((a, b) => a.day_number - b.day_number)
   if (!dd.length) return null
-  const f = new Date(dd[0].date + 'T00:00:00')
-  const l = new Date(dd[dd.length - 1].date + 'T00:00:00')
-  return `${f.toLocaleDateString(locale, { day: 'numeric', month: 'long' })} – ${l.toLocaleDateString(locale, { day: 'numeric', month: 'long', year: 'numeric' })}`
+  const f = new Date(dd[0].date + 'T00:00:00Z')
+  const l = new Date(dd[dd.length - 1].date + 'T00:00:00Z')
+  return `${f.toLocaleDateString(locale, { day: 'numeric', month: 'long', timeZone: 'UTC' })} – ${l.toLocaleDateString(locale, { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })}`
 }
 
 function dayCost(assignments, dayId, locale) {
@@ -70,19 +97,29 @@ function dayCost(assignments, dayId, locale) {
   return total > 0 ? `${total.toLocaleString(locale)} EUR` : null
 }
 
-// Pre-fetch Google Place photos for all assigned places
-async function fetchPlacePhotos(assignments) {
+// Pre-fetch place photos for all assigned places.
+// Assignment places are a server-side projection that drops osm_id, so we recover
+// the full place from the trip's places pool and key the photo off the same id the
+// app UI uses (google_place_id || osm_id || coords) — otherwise OSM/coords-only
+// places fell back to category icons in the PDF even though they show photos in-app.
+async function fetchPlacePhotos(assignments: AssignmentsMap, places: Place[]) {
   const photoMap = {} // placeId → photoUrl
+  // The assignment projection drops osm_id, so recover it from the full places pool.
+  const osmById = new Map((places || []).map(p => [p.id, p.osm_id]))
   const allPlaces = Object.values(assignments).flatMap(a => a.map(x => x.place)).filter(Boolean)
   const unique = [...new Map(allPlaces.map(p => [p.id, p])).values()]
 
-  const toFetch = unique.filter(p => !p.image_url && p.google_place_id)
+  const toFetch = unique
+    .map(p => ({ p, osm_id: osmById.get(p.id) }))
+    .filter(({ p, osm_id }) => !p.image_url && (p.google_place_id || osm_id || (p.lat != null && p.lng != null)))
 
   await Promise.allSettled(
-    toFetch.map(async (place) => {
+    toFetch.map(async ({ p, osm_id }) => {
+      // Same key the app UI uses: google_place_id || osm_id || coords.
+      const photoId = p.google_place_id || osm_id || `coords:${p.lat}:${p.lng}`
       try {
-        const data = await mapsApi.placePhoto(place.google_place_id)
-        if (data.photoUrl) photoMap[place.id] = data.photoUrl
+        const data = await mapsApi.placePhoto(photoId, p.lat, p.lng, p.name)
+        if (data.photoUrl) photoMap[p.id] = data.photoUrl
       } catch {}
     })
   )
@@ -95,27 +132,68 @@ interface downloadTripPDFProps {
   places: Place[]
   assignments: AssignmentsMap
   categories: Category[]
-  dayNotes: DayNotesMap
+  // Flattened across days: each note carries its own day_id (see downloadTripPDF callers).
+  dayNotes: DayNote[]
+  reservations?: any[]
   t: (key: string, params?: Record<string, string | number>) => string
   locale: string
 }
 
-export async function downloadTripPDF({ trip, days, places, assignments, categories, dayNotes, t: _t, locale: _locale }: downloadTripPDFProps) {
+export async function downloadTripPDF({ trip, days, places, assignments, categories, dayNotes, reservations = [], t: _t, locale: _locale }: downloadTripPDFProps) {
   await ensureRenderer()
-  const loc = _locale || 'de-DE'
+  const loc = _locale || undefined
   const tr = _t || (k => k)
   const sorted = [...(days || [])].sort((a, b) => a.day_number - b.day_number)
   const range = longDateRange(sorted, loc)
   const coverImg = safeImg(trip?.cover_image)
+  //retrieve accommodations for the trip to display on the day sections and prefetch their photos if needed
+  const accommodations = await accommodationsApi.list(trip.id);
 
-  // Pre-fetch place photos from Google
-  const photoMap = await fetchPlacePhotos(assignments)
+  // Pre-fetch place photos (Google, OSM and coords-only places)
+  const photoMap = await fetchPlacePhotos(assignments, places)
 
   const totalAssigned = new Set(
     Object.values(assignments || {}).flatMap(a => a.map(x => x.place?.id)).filter(Boolean)
   ).size
   const totalCost = Object.values(assignments || {})
-    .flatMap(a => a).reduce((s, a) => s + (parseFloat(a.place?.price) || 0), 0)
+    .flatMap(a => a).reduce((s, a) => s + (Number(a.place?.price) || 0), 0)
+
+  // Span helpers for multi-day transport (mirrors DayPlanSidebar logic)
+  const pdfGetDayOrder = (d: Day) => d.day_number
+  const pdfGetSpanPhase = (r: any, dayId: number): 'single' | 'start' | 'middle' | 'end' => {
+    const startId = r.day_id
+    const endId = r.end_day_id ?? startId
+    if (!startId || startId === endId) return 'single'
+    if (dayId === startId) return 'start'
+    if (dayId === endId) return 'end'
+    return 'middle'
+  }
+  const pdfGetDisplayTime = (r: any, dayId: number): string | null => {
+    const phase = pdfGetSpanPhase(r, dayId)
+    if (phase === 'end') return r.reservation_end_time || null
+    if (phase === 'middle') return null
+    return r.reservation_time || null
+  }
+  const pdfGetSpanLabel = (r: any, phase: string): string | null => {
+    if (phase === 'single') return null
+    if (r.type === 'flight') return tr(`reservations.span.${phase === 'start' ? 'departure' : phase === 'end' ? 'arrival' : 'inTransit'}`)
+    if (r.type === 'car') return tr(`reservations.span.${phase === 'start' ? 'pickup' : phase === 'end' ? 'return' : 'active'}`)
+    return tr(`reservations.span.${phase === 'start' ? 'start' : phase === 'end' ? 'end' : 'ongoing'}`)
+  }
+  const pdfGetTransportForDay = (dayId: number) => (reservations || []).filter(r => {
+    if (r.type === 'hotel') return false
+    const startId = r.day_id
+    const endId = r.end_day_id ?? startId
+    if (startId == null) return false
+    if (endId !== startId) {
+      const startDay = sorted.find(d => d.id === startId)
+      const endDay = sorted.find(d => d.id === endId)
+      const thisDay = sorted.find(d => d.id === dayId)
+      if (!startDay || !endDay || !thisDay) return false
+      return pdfGetDayOrder(thisDay) >= pdfGetDayOrder(startDay) && pdfGetDayOrder(thisDay) <= pdfGetDayOrder(endDay)
+    }
+    return startId === dayId
+  })
 
   // Build day HTML
   const daysHtml = sorted.map((day, di) => {
@@ -123,15 +201,86 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
     const notes = (dayNotes || []).filter(n => n.day_id === day.id)
     const cost = dayCost(assignments, day.id, loc)
 
+    // Reservations for this day (hotel rendered via accommodations block; car middle-phase rendered in sidebar header only)
+    const dayReservations = pdfGetTransportForDay(day.id)
+      .filter(r => !(r.type === 'car' && pdfGetSpanPhase(r, day.id) === 'middle'))
+
     const merged = []
-    assigned.forEach(a => merged.push({ type: 'place', k: a.order_index ?? a.sort_order ?? 0, data: a }))
+    assigned.forEach(a => merged.push({ type: 'place', k: a.order_index ?? 0, data: a }))
     notes.forEach(n    => merged.push({ type: 'note',  k: n.sort_order ?? 0, data: n }))
+    dayReservations.forEach(r => {
+      const pos = r.day_positions?.[day.id] ?? r.day_positions?.[String(day.id)] ?? r.day_plan_position ?? (merged.length > 0 ? Math.max(...merged.map(m => m.k)) + 0.5 : 0.5)
+      merged.push({ type: 'reservation', k: pos, data: r })
+    })
     merged.sort((a, b) => a.k - b.k)
 
     let pi = 0
     const itemsHtml = merged.length === 0
       ? `<div class="empty-day">${escHtml(tr('dayplan.emptyDay'))}</div>`
       : merged.map(item => {
+          if (item.type === 'reservation') {
+            const r = item.data
+            const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata || '{}') : (r.metadata || {})
+            const icon = reservationIconSvg(r.type)
+            const color = RESERVATION_COLOR_MAP[r.type] || '#3b82f6'
+            let subtitle = ''
+            // Flights render one subtitle line per leg (see below); everything else is a single line.
+            let subtitleLines: string[] = []
+            if (r.type === 'flight') {
+              const legs = getFlightLegs(r)
+              if (legs.length > 1) {
+                // Multi-leg: one line per leg so every flight number + segment route is shown.
+                subtitleLines = legs.map(l =>
+                  [l.airline, l.flight_number,
+                   (l.from || l.to) ? [l.from, l.to].filter(Boolean).join(' → ') : '']
+                    .filter(Boolean).join(' · '))
+                  .filter(Boolean)
+              } else {
+                // Single-leg: full route over all waypoints (FRA → BER → HND), falling back to the
+                // flat metadata pair for legacy single-leg flights without endpoints.
+                const stops = (r.endpoints || []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).map(e => e.code || e.name)
+                const route = stops.length >= 2 ? stops.join(' → ') : (meta.departure_airport && meta.arrival_airport ? `${meta.departure_airport} → ${meta.arrival_airport}` : '')
+                subtitle = [meta.airline, meta.flight_number, route].filter(Boolean).join(' · ')
+              }
+            }
+            else if (r.type === 'train') {
+              const legs = getTrainLegs(r)
+              if (legs.length > 1) {
+                // Multi-leg: one line per leg so every train number + segment route shows.
+                subtitleLines = legs.map(l =>
+                  [l.train_number, l.platform ? `Gl. ${l.platform}` : '',
+                   (l.from || l.to) ? [l.from, l.to].filter(Boolean).join(' → ') : '']
+                    .filter(Boolean).join(' · '))
+                  .filter(Boolean)
+              } else {
+                const stops = (r.endpoints || []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).map(e => e.code || e.name)
+                const route = stops.length >= 2 ? stops.join(' → ') : ''
+                subtitle = [meta.train_number, meta.platform ? `Gl. ${meta.platform}` : '', meta.seat ? `Seat ${meta.seat}` : '', route].filter(Boolean).join(' · ')
+              }
+            }
+            else if (r.type === 'restaurant') subtitle = [meta.party_size ? `${meta.party_size} guests` : ''].filter(Boolean).join(' · ')
+            else if (r.type === 'event') subtitle = [meta.venue].filter(Boolean).join(' · ')
+            else if (r.type === 'tour') subtitle = [meta.operator].filter(Boolean).join(' · ')
+            if (subtitleLines.length === 0 && subtitle) subtitleLines = [subtitle]
+            const locationLine = r.location || meta.location || ''
+            const phase = pdfGetSpanPhase(r, day.id)
+            const spanLabel = pdfGetSpanLabel(r, phase)
+            const displayTime = pdfGetDisplayTime(r, day.id)
+            const time = splitReservationDateTime(displayTime).time ?? ''
+            const titleHtml = `${spanLabel ? escHtml(spanLabel) + ': ' : ''}${escHtml(r.title)}`
+            return `
+              <div class="note-card" style="border-left: 3px solid ${color};">
+                <div class="note-line" style="background: ${color};"></div>
+                <span class="note-icon">${icon}</span>
+                <div class="note-body">
+                  <div class="note-text" style="font-weight: 600;">${titleHtml}${time ? ` <span style="color:#6b7280;font-weight:400;font-size:10px;">${time}</span>` : ''}</div>
+                  ${subtitleLines.filter(Boolean).map(s => `<div class="note-time">${escHtml(s)}</div>`).join('')}
+                  ${locationLine ? `<div class="note-time">${escHtml(locationLine)}</div>` : ''}
+                  ${r.confirmation_number ? `<div class="note-time" style="font-size:9px;">Code: ${escHtml(r.confirmation_number)}</div>` : ''}
+                </div>
+              </div>`
+          }
+
           if (item.type === 'note') {
             const note = item.data
             return `
@@ -151,9 +300,10 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
           const cat = categories.find(c => c.id === place.category_id)
           const color = cat?.color || '#6366f1'
 
-          // Image: direct > google photo > fallback icon
+          // Image: direct > google photo > fallback icon. Both go through safeImg
+          // so the proxy path is resolved to an absolute URL the PDF can load.
           const directImg = safeImg(place.image_url)
-          const googleImg = photoMap[place.id] || null
+          const googleImg = safeImg(photoMap[place.id])
           const img = directImg || googleImg
 
           const iconSvg = categoryIconSvg(cat?.icon, color, 24)
@@ -179,12 +329,51 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
                   ${cat ? `<span class="cat-badge" style="background:${color}">${escHtml(cat.name)}</span>` : ''}
                 </div>
                 ${place.address ? `<div class="info-row">${svgPin}<span class="info-text">${escHtml(place.address)}</span></div>` : ''}
+                ${(place.lat != null && place.lng != null) ? `<div class="info-row"><span class="info-spacer"></span><span class="info-text muted">${Number(place.lat).toFixed(5)}, ${Number(place.lng).toFixed(5)}</span></div>` : ''}
                 ${place.description ? `<div class="info-row"><span class="info-spacer"></span><span class="info-text muted italic">${escHtml(place.description)}</span></div>` : ''}
                 ${chips ? `<div class="chips">${chips}</div>` : ''}
                 ${place.notes ? `<div class="info-row"><span class="info-spacer"></span><span class="info-text muted italic">${escHtml(place.notes)}</span></div>` : ''}
               </div>
             </div>`
-        }).join('')
+      }).join('')
+
+    const accommodationsForDay = (accommodations.accommodations || []).filter(a =>
+      day ? isDayInAccommodationRange(day, a.start_day_id, a.end_day_id, days) : false
+    ).sort((a, b) => {
+      const startA = days.find(d => d.id === a.start_day_id)
+      const startB = days.find(d => d.id === b.start_day_id)
+      return (startA ? getDayOrder(startA, days) : 0) - (startB ? getDayOrder(startB, days) : 0)
+    })
+
+    const accommodationDetails = accommodationsForDay.map(item => {
+      const isCheckIn = day.id === item.start_day_id
+      const isCheckOut = day.id === item.end_day_id
+      const actionLabel = isCheckIn ? tr('reservations.meta.checkIn')
+        : isCheckOut ? tr('reservations.meta.checkOut')
+        : tr('reservations.meta.linkAccommodation')
+      const actionIcon = isCheckIn ? accommodationIconSvg('checkin')
+        : isCheckOut ? accommodationIconSvg('checkout')
+        : accommodationIconSvg('accommodation')
+      const timeStr = isCheckIn ? (item.check_in || '')
+        : isCheckOut ? (item.check_out || '')
+        : ''
+
+      return `
+        <div class="day-accommodation">
+          <div class="day-accommodation-title accommodation-center-icon">${actionIcon} ${escHtml(actionLabel)}</div>
+          ${timeStr ? `<div class="accommodation-center-icon">${accommodationIconSvg('checkin')} <b>${escHtml(timeStr)}</b></div>` : ''}
+          <div class="accommodation-center-icon">${accommodationIconSvg('accommodation')} ${escHtml(item.place_name)}</div>
+          ${item.place_address ? `<div class="accommodation-center-icon">${accommodationIconSvg('location')} ${escHtml(item.place_address)}</div>` : ''}
+          ${item.notes ? `<div class="accommodation-center-icon">${accommodationIconSvg('note')} ${escHtml(item.notes)}</div>` : ''}
+          ${isCheckIn && item.confirmation ? `<div class="accommodation-center-icon">${accommodationIconSvg('confirmation')} ${escHtml(item.confirmation)}</div>` : ''}
+        </div>`
+    }).join('')
+
+    const accommodationsHtml = accommodationsForDay.length > 0
+      ? `<div class="day-accommodations-overview">
+          <div class="day-accommodations ${accommodationsForDay.length === 1 ? 'single' : ''}">${accommodationDetails}</div>
+        </div>`
+      : ''
 
     return `
       <div class="day-section${di > 0 ? ' page-break' : ''}">
@@ -194,8 +383,8 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
           ${day.date ? `<span class="day-date">${shortDate(day.date, loc)}</span>` : ''}
           ${cost ? `<span class="day-cost">${cost}</span>` : ''}
         </div>
-        <div class="day-body">${itemsHtml}</div>
-      </div>`
+        <div class="day-body">${accommodationsHtml}${itemsHtml}</div>
+      </div>`  
   }).join('')
 
   const html = `<!DOCTYPE html>
@@ -277,6 +466,22 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
   .day-date  { font-size: 9px; color: rgba(255,255,255,0.45); }
   .day-cost  { font-size: 9px; font-weight: 600; color: rgba(255,255,255,0.65); }
   .day-body  { padding: 12px 28px 6px; }
+
+  /* accommodation info */
+  .day-accommodations-overview { font-size: 12px; }
+  .day-accommodations { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
+  .day-accommodations.single { justify-content: center; }
+  .day-accommodation {
+    flex: 1 1 45%; min-width: 200px; margin: 4px 0; padding: 10px;
+    border: 2px solid #e2e8f0; border-radius: 12px;
+    display: flex; flex-direction: column;
+  }
+  .day-accommodation-title {
+    font-size: 16px; font-weight: 600; text-align: center;
+    margin-bottom: 4px; align-self: center;
+  }
+  .accommodation-center-icon { display: flex; align-items: center; gap: 4px; }
+
 
   /* ── Place card ────────────────────────────────── */
   .place-card {
@@ -412,6 +617,8 @@ ${daysHtml}
 
   const iframe = document.createElement('iframe')
   iframe.style.cssText = 'flex:1;width:100%;border:none;'
+  // No script runs inside the document (print is parent-initiated), so withhold
+  // allow-scripts to keep the sandbox tight.
   iframe.sandbox = 'allow-same-origin allow-modals'
   iframe.srcdoc = html
 
@@ -420,6 +627,8 @@ ${daysHtml}
   overlay.appendChild(card)
   document.body.appendChild(overlay)
 
-  header.querySelector('#pdf-close-btn').onclick = () => overlay.remove()
-  header.querySelector('#pdf-print-btn').onclick = () => { iframe.contentWindow?.print() }
+  const closeBtn = header.querySelector<HTMLElement>('#pdf-close-btn')
+  if (closeBtn) closeBtn.onclick = () => overlay.remove()
+  const printBtn = header.querySelector<HTMLElement>('#pdf-print-btn')
+  if (printBtn) printBtn.onclick = () => { iframe.contentWindow?.print() }
 }

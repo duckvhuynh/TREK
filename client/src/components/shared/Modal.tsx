@@ -1,4 +1,5 @@
 import React, { useEffect, useCallback, useRef } from 'react'
+import ReactDOM from 'react-dom'
 import { X } from 'lucide-react'
 
 const sizeClasses: Record<string, string> = {
@@ -7,6 +8,7 @@ const sizeClasses: Record<string, string> = {
   lg: 'max-w-lg',
   xl: 'max-w-2xl',
   '2xl': 'max-w-4xl',
+  '3xl': 'max-w-5xl',
 }
 
 interface ModalProps {
@@ -47,10 +49,10 @@ export default function Modal({
 
   if (!isOpen) return null
 
-  return (
+  return ReactDOM.createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start sm:items-center justify-center px-4 modal-backdrop"
-      style={{ backgroundColor: 'rgba(15, 23, 42, 0.5)', paddingTop: 70, paddingBottom: 20, overflow: 'hidden' }}
+      className="fixed inset-0 z-[10000] flex items-start sm:items-center justify-center px-4 trek-modal-backdrop trek-backdrop-enter bg-[rgba(15,23,42,0.5)]"
+      style={{ paddingTop: 70, paddingBottom: 'calc(20px + var(--bottom-nav-h))', overflow: 'hidden' }}
       onMouseDown={e => { mouseDownTarget.current = e.target }}
       onClick={e => {
         if (e.target === e.currentTarget && mouseDownTarget.current === e.currentTarget) onClose()
@@ -59,19 +61,17 @@ export default function Modal({
     >
       <div
         className={`
-          rounded-2xl shadow-2xl w-full ${sizeClasses[size] || sizeClasses.md}
-          flex flex-col max-h-[calc(100vh-90px)]
-          animate-in fade-in zoom-in-95 duration-200
+          trek-modal-enter
+          rounded-2xl overflow-hidden shadow-2xl w-full ${sizeClasses[size] || sizeClasses.md}
+          flex flex-col
+          max-h-[calc(100dvh-var(--bottom-nav-h)-90px)] sm:max-h-[calc(100dvh-90px)]
+          bg-surface-card
         `}
-        style={{
-          animation: 'modalIn 0.2s ease-out forwards',
-          background: 'var(--bg-card)',
-        }}
         onClick={e => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between p-6" style={{ borderBottom: '1px solid var(--border-secondary)' }}>
-          <h2 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>{title}</h2>
+        {/* Header — stays put even while the body scrolls */}
+        <div className="flex items-center justify-between p-6 flex-shrink-0 border-b border-edge-secondary">
+          <h2 className="text-lg font-semibold text-content">{title}</h2>
           {!hideCloseButton && (
             <button
               onClick={onClose}
@@ -82,25 +82,20 @@ export default function Modal({
           )}
         </div>
 
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto p-6">
+        {/* Body — scrolls when content overflows. min-h-0 lets the flex child shrink below its intrinsic height. */}
+        <div className="flex-1 overflow-y-auto p-6 min-h-0">
           {children}
         </div>
 
-        {/* Footer */}
+        {/* Footer — sticky at the bottom of the modal, never compressed */}
         {footer && (
-          <div className="p-6" style={{ borderTop: '1px solid var(--border-secondary)' }}>
+          <div className="p-6 flex-shrink-0 border-t border-edge-secondary">
             {footer}
           </div>
         )}
       </div>
 
-      <style>{`
-        @keyframes modalIn {
-          from { opacity: 0; transform: scale(0.95) translateY(-10px); }
-          to { opacity: 1; transform: scale(1) translateY(0); }
-        }
-      `}</style>
-    </div>
+    </div>,
+    document.body
   )
 }

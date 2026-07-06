@@ -3,6 +3,10 @@ node_modules/
 
 # Build output
 client/dist/
+server/dist/
+shared/dist/
+server/public/*
+!server/public/.gitkeep
 
 # Generated PWA icons (built from SVG via prebuild)
 client/public/icons/*.png
@@ -11,9 +15,12 @@ client/public/icons/*.png
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # User data
-server/data/
+server/data/*
 server/uploads/
 
 # Environment
@@ -28,6 +35,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # Logs
 logs
@@ -52,3 +60,11 @@ coverage
 .cache
 *.tsbuildinfo
 *.tgz
+
+.scannerwork
+test-data
+
+.run
+.full-review
+# Wiki offline snapshot is baked in at build, not committed (duplicates wiki/)
+server/assets/wiki/

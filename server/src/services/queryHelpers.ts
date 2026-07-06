@@ -56,8 +56,11 @@ function formatAssignmentWithPlace(a: AssignmentRow, tags: Partial<Tag>[], parti
   return {
     id: a.id,
     day_id: a.day_id,
+    place_id: a.place_id,
     order_index: a.order_index,
     notes: a.notes,
+    assignment_time: a.assignment_time ?? null,
+    assignment_end_time: a.assignment_end_time ?? null,
     participants: participants || [],
     created_at: a.created_at,
     place: {
@@ -77,6 +80,7 @@ function formatAssignmentWithPlace(a: AssignmentRow, tags: Partial<Tag>[], parti
       image_url: a.image_url,
       transport_mode: a.transport_mode,
       google_place_id: a.google_place_id,
+      google_ftid: a.google_ftid,
       website: a.website,
       phone: a.phone,
       category: a.category_id ? {

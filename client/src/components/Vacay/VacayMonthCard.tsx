@@ -3,19 +3,7 @@ import { useTranslation } from '../../i18n'
 import { isWeekend } from './holidays'
 import type { HolidaysMap, VacayEntry } from '../../types'
 
-const WEEKDAYS_EN = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
-const WEEKDAYS_DE = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So']
-const WEEKDAYS_ES = ['Lu', 'Ma', 'Mi', 'Ju', 'Vi', 'Sa', 'Do']
-const WEEKDAYS_FR = ['Lu', 'Ma', 'Me', 'Je', 'Ve', 'Sa', 'Di']
-const WEEKDAYS_BR = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
-const WEEKDAYS_AR = ['اث', 'ثل', 'أر', 'خم', 'جم', 'سب', 'أح']
-
-const MONTHS_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-const MONTHS_DE = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']
-const MONTHS_ES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
-const MONTHS_FR = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre']
-const MONTHS_BR = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
-const MONTHS_AR = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر']
+const WEEKDAY_KEYS = ['vacay.mon', 'vacay.tue', 'vacay.wed', 'vacay.thu', 'vacay.fri', 'vacay.sat', 'vacay.sun'] as const
 
 function hexToRgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16)
@@ -35,22 +23,26 @@ interface VacayMonthCardProps {
   companyMode: boolean
   blockWeekends: boolean
   weekendDays?: number[]
+  tripDates?: Set<string>
+  weekStart?: number
 }
 
 export default function VacayMonthCard({
   year, month, holidays, companyHolidaySet, companyHolidaysEnabled = true, entryMap,
-  onCellClick, companyMode, blockWeekends, weekendDays = [0, 6]
+  onCellClick, companyMode, blockWeekends, weekendDays = [0, 6], tripDates, weekStart = 1
 }: VacayMonthCardProps) {
-  const { language } = useTranslation()
-  
-  const weekdays = language === 'de' ? WEEKDAYS_DE : language === 'es' ? WEEKDAYS_ES : language === 'fr' ? WEEKDAYS_FR : language === 'br' ? WEEKDAYS_BR : language === 'ar' ? WEEKDAYS_AR : WEEKDAYS_EN
-  const monthNames = language === 'de' ? MONTHS_DE : language === 'es' ? MONTHS_ES : language === 'fr' ? MONTHS_FR : language === 'br' ? MONTHS_BR : language === 'ar' ? MONTHS_AR : MONTHS_EN
-  
+  const { t, locale } = useTranslation()
+
+  const WEEKDAY_KEYS_SUNDAY = ['vacay.sun', 'vacay.mon', 'vacay.tue', 'vacay.wed', 'vacay.thu', 'vacay.fri', 'vacay.sat'] as const
+  const orderedKeys = weekStart === 0 ? WEEKDAY_KEYS_SUNDAY : WEEKDAY_KEYS
+  const weekdays = orderedKeys.map(k => t(k))
+  const monthName = useMemo(() => new Intl.DateTimeFormat(locale, { month: 'long' }).format(new Date(year, month, 1)), [locale, year, month])
+
   const weeks = useMemo(() => {
     const firstDay = new Date(year, month, 1)
     const daysInMonth = new Date(year, month + 1, 0).getDate()
-    let startDow = firstDay.getDay() - 1
-    if (startDow < 0) startDow = 6
+    let startDow = firstDay.getDay() - weekStart
+    if (startDow < 0) startDow += 7
     const cells = []
     for (let i = 0; i < startDow; i++) cells.push(null)
     for (let d = 1; d <= daysInMonth; d++) cells.push(d)
@@ -62,18 +54,28 @@ export default function VacayMonthCard({
 
   const pad = (n) => String(n).padStart(2, '0')
 
+  const todayStr = useMemo(() => {
+    const d = new Date()
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  }, [])
+
   return (
-    <div className="rounded-xl border overflow-hidden" style={{ background: 'var(--bg-card)', borderColor: 'var(--border-primary)' }}>
-      <div className="px-3 py-2 border-b" style={{ borderColor: 'var(--border-secondary)' }}>
-        <span className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>{monthNames[month]}</span>
+    <div className="rounded-xl border overflow-hidden bg-surface-card border-edge">
+      <div className="px-3 py-2 border-b border-edge-secondary">
+        <span className="text-xs font-semibold capitalize text-content">{monthName}</span>
       </div>
 
-      <div className="grid grid-cols-7 border-b" style={{ borderColor: 'var(--border-secondary)' }}>
-        {weekdays.map((wd, i) => (
-          <div key={wd} className="text-center text-[10px] font-medium py-1" style={{ color: i >= 5 ? 'var(--text-faint)' : 'var(--text-muted)' }}>
-            {wd}
-          </div>
-        ))}
+      <div className="grid grid-cols-7 border-b border-edge-secondary">
+        {weekdays.map((wd, i) => {
+          // Map column index back to JS day (0=Sun..6=Sat) to check if it's a weekend column
+          const jsDay = (i + weekStart) % 7
+          const isWeekendCol = weekendDays.includes(jsDay)
+          return (
+            <div key={`${wd}-${i}`} className={`text-center text-[10px] font-medium py-1 ${isWeekendCol ? 'text-content-faint' : 'text-content-muted'}`}>
+              {wd}
+            </div>
+          )
+        })}
       </div>
 
       <div>
@@ -88,11 +90,13 @@ export default function VacayMonthCard({
               const holiday = holidays[dateStr]
               const isCompany = companyHolidaysEnabled && companyHolidaySet.has(dateStr)
               const dayEntries = entryMap[dateStr] || []
-              const isBlocked = !!holiday || (weekend && blockWeekends) || (isCompany && !companyMode)
+              const isBlocked = (weekend && blockWeekends) || (isCompany && !companyMode)
+              const isToday = dateStr === todayStr
 
               return (
                 <div
                   key={di}
+                  title={holiday ? (holiday.label ? `${holiday.label}: ${holiday.localName}` : holiday.localName) : undefined}
                   className="relative flex items-center justify-center cursor-pointer transition-colors"
                   style={{
                     height: 28,
@@ -106,7 +110,7 @@ export default function VacayMonthCard({
                   onMouseLeave={e => { e.currentTarget.style.background = weekend ? 'var(--bg-secondary)' : 'transparent' }}
                 >
                   {holiday && <div className="absolute inset-0.5 rounded" style={{ background: hexToRgba(holiday.color, 0.12) }} />}
-                  {isCompany && <div className="absolute inset-0.5 rounded" style={{ background: 'rgba(245,158,11,0.15)' }} />}
+                  {isCompany && <div className="absolute inset-0.5 rounded bg-[rgba(245,158,11,0.15)]" />}
 
                   {dayEntries.length === 1 && (
                     <div className="absolute inset-0.5 rounded" style={{ backgroundColor: dayEntries[0].person_color, opacity: 0.4 }} />
@@ -133,9 +137,28 @@ export default function VacayMonthCard({
                     </div>
                   )}
 
-                  <span className="relative z-[1] text-[11px] font-medium" style={{
-                    color: holiday ? holiday.color : weekend ? 'var(--text-faint)' : 'var(--text-primary)',
+                  {tripDates?.has(dateStr) && (
+                    <span className="absolute top-[3px] right-[3px] w-[5px] h-[5px] rounded-full z-[2] bg-[#3b82f6]" />
+                  )}
+
+                  <span className="relative z-[1] text-[11px]" style={{
                     fontWeight: dayEntries.length > 0 ? 700 : 500,
+                    color: isToday
+                      ? '#fff'
+                      : dayEntries.length > 0
+                        ? 'var(--text-primary)'
+                        : holiday ? holiday.color
+                        : weekend ? 'var(--text-faint)'
+                        : 'var(--text-primary)',
+                    ...(isToday ? {
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: 18,
+                      height: 18,
+                      borderRadius: '50%',
+                      background: '#3b82f6',
+                    } : {}),
                   }}>
                     {day}
                   </span>
